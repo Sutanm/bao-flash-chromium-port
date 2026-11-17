@@ -1,79 +1,106 @@
-# 端口归档（BaoFlashBrowser · Chromium 138 / 140 原生 PPAPI Flash）
+# BaoFlashBrowser · Chromium 140 上的原生 PPAPI Flash
 
-本目录是**可移植的留痕归档**：记录"在 Chromium 138 与 140 上跑通原生 PPAPI Flash"所需的全部补丁、清单与校验值。
-不包含 Chromium 全量源码，也不包含 Flash 插件二进制（版权原因）。
+> **在 Chromium 140 / Electron 38 的单内核里，跑通原生 PPAPI Flash，并渲染出真实 Flash 游戏。**
+> 不是双内核，不是 Ruffle，不是 CEF 外挂——是同一个 Electron 进程里跑的原生 Flash 插件。
 
-## 内容
+![FlxInvaders 在 Chromium 140 上运行](screenshots/flx-invaders-chromium140.png)
 
-| 路径 | 说明 |
+*`FlxInvaders.swf`（68 KB ActionScript 游戏）在自建 Electron 38 / Chromium 140 中的实际渲染结果。*
+
+---
+
+## 这是什么
+
+Chromium 在 **138 是最后一个带原生 PPAPI 的版本**，140 把 `ppapi/`、`content/renderer/pepper/`、
+`content/ppapi_plugin/` 以及 Flash 专用接口**全部删除**。
+
+本仓库是"把它们搬回来并重新接线"的完整成果与复现材料：
+
+| 内容 | 说明 |
 | --- | --- |
-| `patches/138-port.patch` | 138（Electron 37 / Chromium 138.0.7204.35）完整补丁（52 新增 + 31 修改） |
-| `patches/140-port.patch` | 140（Electron 38 / Chromium 140.0.7339.41）完整补丁（1782 文件，286 853 行新增） |
-| `manifests/140-name-status.txt` | 140 变更文件清单（A/M/D 状态） |
-| `manifests/140-numstat.txt` | 140 每文件增删行数 |
-| `manifests/138-name-status.txt` | 138 变更文件清单 |
-| `manifests/138-numstat.txt` | 138 每文件增删行数 |
-| `manifests/140-key-files.sha256` | 13 个关键手改文件的 SHA-256（防漂移） |
-| `scripts/restore-140.ps1` | 从 chromium 140 干净树 + 补丁恢复出可用工作树 |
-| `scripts/verify-140.ps1` | 校验恢复结果（关键文件哈希 + 变更计数 + 关键符号） |
+| `patches/140-port.patch` | Chromium 140 / Electron 38 的完整移植补丁（1782 文件 / 286 853 行新增） |
+| `patches/138-port.patch` | Chromium 138 / Electron 37 基线补丁（83 文件） |
+| `manifests/` | 变更清单（name-status / numstat）与 13 个关键文件 SHA-256 |
+| `scripts/restore-140.ps1` | 从干净 Chromium 140 树 + 补丁恢复出可编译工作树 |
+| `scripts/verify-140.ps1` | 校验恢复结果（哈希 / 目录规模 / 关键符号） |
+| `docs/140-ppapi-revival-ai-guide.md` | **面向 AI 的 140 二次实现说明书**（16 阶段 + 25 条错误字典 + harness） |
+| `docs/forward-version-feasibility.md` | 138→140/142/144/150 可行性实测与完整历程（§1.14.11 = 最终状态） |
+| `docs/preservation-plan.md` | 代码保存方案（本地快照 / 补丁归档 / 远程 fork / 冷备） |
+| `docs/blog/` | 两篇对外分享（138 那次、138→140 这次） |
 
-## 版本指纹
+---
 
-```
-140: base 84e1454fbb49226f0b2b0de01343417681d9af10
-     head 08ee1eba6ffe3c62d149793361e1ed6149d1bdd1
-     chrome/VERSION = MAJOR=140 MINOR=0 BUILD=7339 PATCH=41
-     electron = v38.0.0（src/electron）
-     patch  = 1782 files changed, 286853 insertions(+), 7 deletions(-)
+## 已验证的结论
 
-138: head 32b3d14f10612408b31890269b0e8b01fb9d892e
-     chrome/VERSION = MAJOR=138 MINOR=0 BUILD=7204 PATCH=35
-     electron = v37.0.0（src/electron）
-     patch  = 83 files changed
-```
+| 项 | 值 |
+| --- | --- |
+| Chromium | `140.0.7339.41` |
+| Electron | `v38.0.0` |
+| Flash | `29.0.0.171`（原生 PPAPI，win64） |
+| 出帧 | ✅ `FlxInvaders.swf` 完整渲染，`interactiveFrames=3`，三次截图 digest 各不相同 |
+| 基线对照 | Chromium 138 / Electron 37（`bao/138-verified`），同样出帧 |
+| 规模 | 1662 个文件搬运（其中 581 个按 140 API 适配）+ 63 个既有文件修改 |
+| 耗时 | 约 2.2 天 / 18–20 工时 |
 
-## 恢复到新机器
+**Flash 34.0.0.380（国内魔改版）注意**：能初始化、能出图，但带 **EOL 时间炸弹**（"当前版本不再受支持"）。
+推荐用 29.0.0.171。详见 `docs/blog/2026-11-17-138-to-140.md`。
+
+---
+
+## 两个关键坑（文档里有完整推导）
+
+1. **`Make()` 收到空的 `ClientSharedImage`** —— 140 把 `MakeGpu(mailbox…)` 合并成 `Make(shared_image…)`，
+   而 138 的调用点在这一行之前已经把 `shared_image` `std::move` 进释放回调了。修法一行：move 前先留一份。
+2. **Flash 只画一帧白就不动了** —— 140 删了 `WebLocalFrameClient::DidCommitAndDrawCompositorFrame`，
+   `ViewInitiatedPaint()` 不再被调用 → 不发 `Graphics2D FlushAck` → Flash 停在第一帧。
+   临时方案在 `PrepareTransferableResource()` 里发 ack；终态方案见可行性文档 §1.14.11（A/B/C 评估）。
+
+---
+
+## 快速开始（复现）
 
 ```powershell
-# 1) 取干净源码（与 base 同一 commit）
+# 1) 取干净源码（必须是同一个 base commit）
 git clone --no-checkout https://chromium.googlesource.com/chromium/src.git D:\cr140
 cd D:\cr140
 git checkout 84e1454fbb49226f0b2b0de01343417681d9af10
-gclient sync --no-history   # 需要 .gclient 指向 chromium/src + electron/src
+gclient sync --no-history     # .gclient 需同时挂 chromium/src 与 electron/src
 
 # 2) 打补丁
-git am --3way D:\port-archive\patches\140-port.patch
-#    或者：git apply --3way D:\port-archive\patches\140-port.patch
+git apply --3way D:\port-archive\patches\140-port.patch
 
 # 3) 校验
-pwsh -File D:\port-archive\scripts\verify-140.ps1 -Src D:\cr140
+pwsh -File .\scripts\verify-140.ps1 -Src D:\cr140
 
-# 4) 构建（args 见 harness 文档）
+# 4) 构建
 gn gen out/Testing --args='import("//electron/build/args/testing.gn") enable_plugins=true symbol_level=1'
-ninja -C out/Testing -j 6 electron
+ninja -C out/Testing -j 6 electron      # 内存有限时 -j 6 是上限
 ```
 
-> `electron/src` 也要 checkout 到与 chromium 140 匹配的 Electron v38 分支，否则 `import("//electron/build/args/testing.gn")` 会失败。
+运行验证的关键参数（`#` 与 `;` 必须留在引号内）：
 
-## 相关文档（BaoFlashBrowser 仓库内）
+```bat
+electron.exe --allow-command-line-plugins ^
+  "--register-pepper-plugins=<path>\pepflashplayer64.dll#Shockwave Flash#Shockwave Flash 29.0 r0#29.0.0.171;application/x-shockwave-flash#swf#spl" ^
+  --enable-logging --log-file=chrome.log app_dir
+```
 
-- `docs/specs/2026-11-17-chromium140-ppapi-revival-ai-guide.md` — 面向 AI 的 140 复现手册（16 阶段 + 错误字典）
-- `docs/specs/2026-11-15-forward-version-feasibility.md` — 可行性/历程（§1.14.11 = 最终状态）
-- `docs/reports/2026-11-17-port-preservation-plan.md` — 保存方案（本地快照 / 小仓库 / 远程 fork / 冷备）与决策
+判定：`chrome.log` 出现 `initialize_module returned 0`；截图出现真实 SWF 内容；`interactiveFrames >= 2`。
 
-## 合规提示
+---
 
-- Chromium 源码为 BSD-3 许可，补丁可自由分发。
-- **Flash 插件二进制（`pepflashplayer*.dll`）不得进入本归档或任何公开仓库**；归档只记录"用哪个版本、怎么加载"。
+## 代码镜像
 
-## 远端位置（2026-11-17 已推送）
+完整源码快照（fork，分支可直接 clone）：
 
-| 内容 | 远端 |
-| --- | --- |
-| 本归档（补丁 + 清单 + 脚本） | https://github.com/Sutanm/bao-flash-chromium-port （private，`main`） |
-| 140 完整移植快照 | https://github.com/Sutanm/chromium — 分支 `bao/140-verified`（`08ee1eba6ffe3`） |
-| 138 基线快照 | https://github.com/Sutanm/chromium — 分支 `bao/138-verified`（`32b3d14f10612`） |
-| 项目文档（140 手册 / 方案 / 博客） | https://github.com/Sutanm/BaoFlashBrowser — 分支 `docs/port-138-140` |
+- Chromium 140 / Electron 38 移植：`git clone -b bao/140-verified https://github.com/Sutanm/chromium.git`
+- Chromium 138 / Electron 37 基线：`git clone -b bao/138-verified https://github.com/Sutanm/chromium.git`
 
-> `Sutanm/chromium` 是 `chromium/chromium` 的 fork，base 提交在上游已存在，因此推送只上传了 **1712 个 delta / 668 个本地对象**（约 12 MB）。
-> 从零恢复可编译树：`git clone -b bao/140-verified https://github.com/Sutanm/chromium.git`（需接受约 30 GB 的 Chromium 历史，或配合本目录的 patch 走轻量路径）。
+> fork 只是代码镜像，会带上游全部历史与分支；**本仓库才是成果展示 + 复现材料的入口**。
+
+---
+
+## 许可与合规
+
+- Chromium 源码为 BSD-3-Clause，补丁可自由分发。
+- **不含 Flash 插件二进制**（`pepflashplayer*.dll`）。只记录版本号与加载参数。
