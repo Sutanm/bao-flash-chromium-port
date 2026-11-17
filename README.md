@@ -65,3 +65,15 @@ ninja -C out/Testing -j 6 electron
 
 - Chromium 源码为 BSD-3 许可，补丁可自由分发。
 - **Flash 插件二进制（`pepflashplayer*.dll`）不得进入本归档或任何公开仓库**；归档只记录"用哪个版本、怎么加载"。
+
+## 远端位置（2026-11-17 已推送）
+
+| 内容 | 远端 |
+| --- | --- |
+| 本归档（补丁 + 清单 + 脚本） | https://github.com/Sutanm/bao-flash-chromium-port （private，`main`） |
+| 140 完整移植快照 | https://github.com/Sutanm/chromium — 分支 `bao/140-verified`（`08ee1eba6ffe3`） |
+| 138 基线快照 | https://github.com/Sutanm/chromium — 分支 `bao/138-verified`（`32b3d14f10612`） |
+| 项目文档（140 手册 / 方案 / 博客） | https://github.com/Sutanm/BaoFlashBrowser — 分支 `docs/port-138-140` |
+
+> `Sutanm/chromium` 是 `chromium/chromium` 的 fork，base 提交在上游已存在，因此推送只上传了 **1712 个 delta / 668 个本地对象**（约 12 MB）。
+> 从零恢复可编译树：`git clone -b bao/140-verified https://github.com/Sutanm/chromium.git`（需接受约 30 GB 的 Chromium 历史，或配合本目录的 patch 走轻量路径）。
