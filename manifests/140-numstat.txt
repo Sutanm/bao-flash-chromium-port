@@ -89,7 +89,7 @@
 8	0	content/browser/renderer_host/render_frame_host_impl.cc
 8	0	content/browser/renderer_host/render_frame_host_impl.h
 14	0	content/browser/renderer_host/render_frame_host_impl_interface_binders.cc
-199	0	content/browser/renderer_host/render_frame_host_impl_ppapi_support.cc
+209	0	content/browser/renderer_host/render_frame_host_impl_ppapi_support.cc
 97	0	content/browser/renderer_host/render_frame_host_impl_ppapi_support.h
 13	0	content/browser/renderer_host/render_process_host_impl.cc
 9	0	content/browser/renderer_host/render_process_host_impl.h
@@ -190,8 +190,8 @@
 64	0	content/renderer/pepper/pepper_file_ref_renderer_host.h
 181	0	content/renderer/pepper/pepper_file_system_host.cc
 95	0	content/renderer/pepper/pepper_file_system_host.h
-1122	0	content/renderer/pepper/pepper_graphics_2d_host.cc
-270	0	content/renderer/pepper/pepper_graphics_2d_host.h
+1098	0	content/renderer/pepper/pepper_graphics_2d_host.cc
+286	0	content/renderer/pepper/pepper_graphics_2d_host.h
 162	0	content/renderer/pepper/pepper_graphics_2d_host_unittest.cc
 174	0	content/renderer/pepper/pepper_hung_plugin_filter.cc
 122	0	content/renderer/pepper/pepper_hung_plugin_filter.h
