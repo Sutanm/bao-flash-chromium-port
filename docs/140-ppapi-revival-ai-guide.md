@@ -441,6 +441,10 @@ set E19_MODE=control
 | 23 | `only virtual member functions can be marked 'override'`（Flash resource） | `FOR_ALL_PPAPI_RESOURCE_APIS` 里没有 Flash API | 见 §11 的 `resource.h` 改动 |
 | 24 | `PPBFlash_DrawGlyphs_Params` 链接未定义 | `serialized_structs.cc` 的符号没被链进来 | 把 ctor/dtor 改成头文件内 inline |
 | 25 | 编译报 Chromium lint（raw_ptr / 内联虚函数） | 140 的 lint 更严 | 虚函数定义移出类、成员用 `raw_ptr`、成员放在 `WeakPtrFactory` 之前 |
+| 26 | 站点检测不到 Flash（`navigator.plugins` 里只有 PDF） | 140 的 `DOMPluginArray`/`DOMMimeTypeArray` 被换成反指纹的**硬编码 PDF 假列表**，不再读 `PluginData` | 照 87 恢复真实枚举：`EnsurePlugins()/EnsureMimeTypes()` 先读 `PluginData`（先 `UpdatePluginList()`），没有真实插件才退回假列表；`refresh()` 清缓存（§17.1） |
+| 27 | 站点能读到插件对象，但 `el.GetVariable`/`checkflash()` 全是 `undefined`（Flash→JS 正常、JS→Flash 全废） | 140 的 gin 不再由 `NamedPropertyInterceptor` 构造函数自动注册拦截器（87 会 `PerIsolateData::SetNamedPropertyInterceptor`），`DeprecatedWrappableBase::GetNamedPropertyInterceptor()` 返回 nullptr → Blink 的 `AnonymousNamedGetter` 里 `HasOwnProperty` 恒 false | 给 `PluginObject` 与 `MessageChannel` override `gin::NamedPropertyInterceptor* GetNamedPropertyInterceptor() { return this; }`（§17.2） |
+| 28 | AS3 `Socket`/`XMLSocket` 的 `connect()` 既不连也不报错（本地监听端口一个连接都收不到） | `RenderFrameImpl::pepper_routing_id_` 默认 **-1** 且从未赋值（140 删 PPAPI 时连赋值一起删），`RenderFrame::GetRoutingID()` 恒 -1 → 插件实例上报 `render_frame_id=-1` → `PepperTCPSocketMessageFilter::OnMsgConnect` 里 `RenderFrameHost::FromID(pid,-1)==null` → 直接 `PP_ERROR_FAILED` | 构造 `RenderFrameImpl` 时用 `CreateParams::routing_id` 初始化 `pepper_routing_id_`（§17.3） |
+| 29 | 联网 Flash 游戏卡在资源加载（如《美食大战老鼠》75%），CDN 的 `.xml` 全失败、`net::ERR_BLOCKED_BY_ORB`(-32) | ORB（Opaque Response Blocking）把插件跨域的 `text/xml` 当可疑数据拦掉；87 没有 ORB | 请求级豁免：给 `URLRequest` 加 `skip_orb` 通道，只由 `PepperURLLoaderHost` 置位，`url_loader.cc` 命中就不建 ORB analyzer（§17.4）。**不要全局关 ORB** |
 
 ---
 
@@ -496,3 +500,111 @@ cmd /c D:\electron-build\run-flash-140.cmd
 - [ ] §12 harness 跑通：`pepperProcess=true`、`initialize_module returned 0`
 - [ ] §12 出帧：`interactiveFrames>=2` 且截图是真实 SWF
 - [ ] 用 **Flash 29.0.0.171** 验证（34 魔改版有 EOL 时间炸弹）
+
+---
+
+## 17. 站点兼容四条（2D 出帧之后才会暴露，全部"静默失败"）
+
+这四条的共同特点：**Flash 本身没崩、日志没报错、画面也不一定白**，但真实站点用不了。
+它们的定位都需要"最小探针 + 与 Chromium 87 做 A/B"。
+
+### 17.1 `navigator.plugins` / `mimeTypes` 看不到 Flash（错误字典 #26）
+
+现象：站点判定"未安装 Flash"（如 4399 显示 `blockflashtip.html`）。
+判定：页面里执行
+
+```js
+navigator.mimeTypes['application/x-shockwave-flash']   // undefined
+navigator.plugins['Shockwave Flash']                   // undefined
+```
+
+根因：140 把 `DOMPluginArray`/`DOMMimeTypeArray` 换成了反指纹的**硬编码 PDF 假列表**
+（crbug.com/1164635），不再读 `PluginData`。而渲染进程其实一直收得到真实插件列表。
+
+修法（照 87）：两处各加 `EnsurePlugins()/EnsureMimeTypes()` —— 先 `PluginData::UpdatePluginList()`
+再用 `data->Plugins()/data->Mimes()` 构造；**没有真实插件时**才退回 PDF 假列表；`refresh()` 清缓存重枚举。
+注意 `DOMMimeTypeArray` 新增的 `Member<LocalDOMWindow>` 必须进 `Trace()`，否则 blink-gc 报
+`has untraced fields that require tracing`。
+
+### 17.2 JS ↔ Flash 脚本桥（错误字典 #27）
+
+现象：Flash→JS 正常（`ExternalInterface.call` 有回调），但 JS→Flash 全废：
+`el.GetVariable` / `el.PercentLoaded` / `el.checkflash()` 都是 `undefined`。
+最小探针：SWF 里 `ExternalInterface.addCallback("ping", ...)`，页面 `el.ping()`。
+
+根因：87 的 `gin::NamedPropertyInterceptor` 构造函数会自己注册到 `PerIsolateData`
+（`interceptor.cc: SetNamedPropertyInterceptor(base_, this)`）；140 删了自动注册，只保留
+`DeprecatedWrappableWithNamedPropertyInterceptor<T>`。而 `PluginObject`/`MessageChannel`
+仍是 87 的写法 → `DeprecatedWrappableBase::GetNamedPropertyInterceptor()` 返回 `nullptr`
+→ gin 的 `NamedPropertyQuery` 恒 `kNo` → Blink `HTMLPlugInElement::AnonymousNamedGetter`
+里 `instance->HasOwnProperty(name)` 恒 false → 直接返回空值。
+
+修法：两个类各加一行 override（定义放 .cc，别内联，否则 lint 报错）：
+
+```cpp
+gin::NamedPropertyInterceptor* GetNamedPropertyInterceptor() override { return this; }
+```
+
+### 17.3 Flash Socket / XMLSocket 完全不工作（错误字典 #28）
+
+现象：AS3 `new Socket().connect(host, port)` **既不触发 CONNECT 也不触发 IO_ERROR**，
+本地监听端口一个连接都收不到（用 `SocketProbe.swf` 连 `127.0.0.1:18099` 一比即知）。
+
+根因链：
+
+```
+RenderFrameImpl::pepper_routing_id_ 默认 -1，且从未赋值（140 删 PPAPI 时一起删了）
+  → RenderFrame::GetRoutingID() = -1
+  → 插件实例上报 render_frame_id = -1（host_dispatcher_wrapper → PepperBrowserConnection）
+  → PepperTCPSocketMessageFilter: rph=4 frame=-1
+  → OnMsgConnect 里 RenderFrameHost::FromID(pid, -1) == null
+  → return PP_ERROR_FAILED（Flash 侧静默失败）
+```
+
+修法：构造 `RenderFrameImpl` 时 `pepper_routing_id_(params.routing_id)`。
+
+定位手法（可复用）：给三段插桩——`ContentBrowserPepperHostFactory::CreateResourceHost`
+打 `message.type()`、`PepperTCPSocketMessageFilter` 构造打 `render_process_id_/render_frame_id_`、
+`GetNetworkContext()` 打 rph 是否为空；再用 `InterfaceList::GetInterfaceForPPB` 打
+`registered=/perm_ok=/perm_bits=` 排除权限问题（命令行注册的插件本就是 255 全权限，别往这条上猜）。
+
+### 17.4 联网游戏卡在资源加载 / `ERR_BLOCKED_BY_ORB`（错误字典 #29）
+
+现象：《美食大战老鼠》这类联网游戏停在某个百分比（本例 75%），游戏自带诊断工具显示
+"模块全部 Complete 但没有任何网络日志"。给 `PepperURLLoaderHost` 打 URLLoader
+open/finish/FAIL 探针后可看到一批 `.xml` 全部 `err=-32`。
+
+根因：`-32 = net::ERR_BLOCKED_BY_ORB` —— Chromium 的 Opaque Response Blocking 把
+插件跨域拉取的 `text/xml` 当可疑数据拦掉。Chromium 87（最后一个带 Flash 的版本）没有 ORB。
+
+修法（**不要全局关 ORB**）：做一条请求级豁免链，照 `skip_service_worker` 的既有模式：
+
+```
+services/network/public/mojom/url_request.mojom      URLRequest::skip_orb
+services/network/public/cpp/resource_request.{h,cc}  字段 + Equals
+services/network/public/cpp/url_request_mojom_traits.{h,cc}
+services/network/prefetch_matches.cc                 DO_FIELD(skip_orb) ← 结构化绑定计数
+services/network/url_loader.{h,cc}                   skip_orb_ 成员；命中则不建 analyzer
+blink .../fetch/resource_request.{h,cc}              skip_orb_ 位 + Get/Set + 重定向复制
+blink public/platform/web_url_request.h + exported/web_url_request.cc
+blink .../url_loader/request_conversion.cc           dest->skip_orb
+content/renderer/pepper/pepper_url_loader_host.cc    web_request.SetSkipOrb(true)  ← 只有插件
+```
+
+关键事实（决定为什么能"两全其美"）：`orb_impl.cc::IsOpaqueResponse()` 里
+`if (!request_initiator.has_value()) return false;` —— ORB 只作用于带 initiator 的 no-cors 请求。
+
+踩过的弯路：先试"让插件请求不带 initiator"（改 `ResourceFetcher` 跳过 PLUGIN 请求的 origin 填充）
+**无效**——initiator 在 `WebAssociatedURLLoader → ThreadableLoader → ResourceLoader` 链路里被补，
+不在那一处。所以走显式标记。
+
+验收（两个方向都要测，缺一不可）：
+
+| 方向 | 期望 |
+| --- | --- |
+| 插件侧跨域 `Authenticate.xml`（`OrbProbe.swf`） | `HTTP_STATUS 200` + `COMPLETE bytes>0` |
+| 页面侧同 URL `fetch(no-cors)` | `opaque / status=0`（ORB 注入空响应） |
+| 页面侧同 URL `<script src>` | `ERROR(blocked)` |
+
+工程备注：改公共 mojom 会触发约 2000 步重建（content + network + blink platform）。
+32 核 / 31.8GB 上 `-j 8` 实测可用内存最低 9GB，约 50 分钟，0 错误。
