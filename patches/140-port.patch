@@ -1,7 +1,7 @@
 From 08ee1eba6ffe3c62d149793361e1ed6149d1bdd1 Mon Sep 17 00:00:00 2001
 From: Sutanm <954708543@qq.com>
 Date: Tue, 17 Nov 2026 22:52:06 +0800
-Subject: [PATCH 1/2] port(140): revive native PPAPI Flash on Chromium 140 /
+Subject: [PATCH 01/11] port(140): revive native PPAPI Flash on Chromium 140 /
  Electron 38 (verified rendering)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -301922,7 +301922,7 @@ index fdb12b460f148..943c2b9ced3a5 160000
 From a54a191522a6ece8b0bdf77cee691cf2a738af51 Mon Sep 17 00:00:00 2001
 From: Sutanm <954708543@qq.com>
 Date: Wed, 18 Nov 2026 09:50:25 +0800
-Subject: [PATCH 2/2] =?UTF-8?q?feat(pepper):=20=E6=96=B9=E6=A1=88=20A=20?=
+Subject: [PATCH 02/11] =?UTF-8?q?feat(pepper):=20=E6=96=B9=E6=A1=88=20A=20?=
  =?UTF-8?q?=E2=80=94=E2=80=94=20FlushAck=20=E6=94=B9=E4=B8=BA"=E5=B8=A7?=
  =?UTF-8?q?=E5=91=88=E7=8E=B0=E5=90=8E"=E5=8F=91=E9=80=81?=
 MIME-Version: 1.0
@@ -302253,6 +302253,3561 @@ index dbfb35d747672..cb8c46e278253 100644
    // When doing offscreen flushes, we issue a task that issues the callback
    // later. This is set when one of those tasks is pending so that we can
    // enforce the "only one pending flush at a time" constraint in the API.
+-- 
+2.55.0.windows.2
+
+
+From 2aac068ba2e6c9dbc1d74dcb29e4e5852bbba41c Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 11:33:56 +0800
+Subject: [PATCH 03/11] =?UTF-8?q?feat(pepper):=20=E5=AE=9E=E7=8E=B0=20PPB?=
+ =?UTF-8?q?=5FFlash=5FFile=20=E5=AE=BF=E4=B8=BB=20=E2=80=94=E2=80=94=20Fla?=
+ =?UTF-8?q?sh=20=E6=9C=AC=E5=9C=B0=E5=AD=98=E5=82=A8=EF=BC=88LSO=EF=BC=89?=
+ =?UTF-8?q?=E6=81=A2=E5=A4=8D=E5=8F=AF=E7=94=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+背景：Flash 启动时通过 PPB_Flash_File 初始化可写根目录，140 移植里没有该宿主，
+导致每个实例 400+ 次 FlashFile_CreateDir 失败，AS3 侧 SharedObject.getLocal()
+直接抛 Error #2134（Cannot create SharedObject），所有"存档/存分数"的功能失效。
+
+改动：
+1. 新增 content/browser/renderer_host/pepper/pepper_flash_file_message_filter.{h,cc}
+   —— 从 Chromium M80 的同名实现移植（历史提交里仍有源码），适配 140：
+   * base::Callback → base::RepeatingCallback
+   * base::CreateSequencedTaskRunner({ThreadPool…}) → base::ThreadPool::CreateSequencedTaskRunner
+   * base::DeleteFile(path, recursive) → DeletePathRecursively / DeleteFile
+   * FLAG_TEMPORARY → FLAG_WIN_TEMPORARY（仅 Windows）
+   * 去掉 NOTREACHED()（Testing 构建里是致命的）：改为 LOG(ERROR) + fail-closed
+2. content_browser_pepper_host_factory.cc：处理 PpapiHostMsg_FlashFile_Create，
+   用 MessageFilterHost 包一层返回。
+3. content/browser/BUILD.gn：加入新源文件。
+
+验证（Flash 29.0.0.171 / Chromium 140）：
+- LSO 读写：新探针 LsoRoundTrip（读→自增→flush），连续两次运行
+  第 1 次 count=0→1，第 2 次 count=1→2，flush=flushed，RESULT=OK
+- 磁盘落盘：%APPDATA%\e19-ppapi-test\Pepper Data\Shockwave Flash\WritableRoot\
+  #SharedObjects\<id>\127.0.0.1\LsoRoundTrip.swf\bao_probe.sol（50 B）
+- Canabalt.swf：FlashFile_* 失败从 426 次降到 0；ppexp 只剩 Flash_Create×2、
+  SetInstanceAlwaysOnTop×1（下一个 P0 项）与 339 条非 Flash 消息
+- 回归：FlxInvaders 仍交互 3 帧、无 CHECK/FATAL
+---
+ content/browser/BUILD.gn                      |   2 +
+ .../content_browser_pepper_host_factory.cc    |  12 +
+ .../pepper_flash_file_message_filter.cc       | 307 ++++++++++++++++++
+ .../pepper/pepper_flash_file_message_filter.h |  95 ++++++
+ 4 files changed, 416 insertions(+)
+ create mode 100644 content/browser/renderer_host/pepper/pepper_flash_file_message_filter.cc
+ create mode 100644 content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h
+
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index f1b247ed03d91..d742a80d3f488 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -3703,6 +3703,8 @@ source_set("browser") {
+         "renderer_host/pepper/pepper_file_ref_host.h",
+         "renderer_host/pepper/pepper_file_system_browser_host.cc",
+         "renderer_host/pepper/pepper_file_system_browser_host.h",
++        "renderer_host/pepper/pepper_flash_file_message_filter.cc",
++        "renderer_host/pepper/pepper_flash_file_message_filter.h",
+         "renderer_host/pepper/pepper_gamepad_host.cc",
+         "renderer_host/pepper/pepper_gamepad_host.h",
+         "renderer_host/pepper/pepper_host_resolver_message_filter.cc",
+diff --git a/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc b/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc
+index 301882846d505..174de87c61ff0 100644
+--- a/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc
++++ b/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc
+@@ -12,6 +12,7 @@
+ #include "content/browser/renderer_host/pepper/pepper_file_io_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_file_ref_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_file_system_browser_host.h"
++#include "content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h"
+ #include "content/browser/renderer_host/pepper/pepper_gamepad_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_host_resolver_message_filter.h"
+ #include "content/browser/renderer_host/pepper/pepper_network_monitor_host.h"
+@@ -208,6 +209,17 @@ ContentBrowserPepperHostFactory::CreateResourceHost(
+         new PepperNetworkMonitorHost(host_, instance, resource));
+   }
+ 
++  // PPAPI revival: Flash-private file API (PPB_Flash_File / FileModuleLocal).
++  // Flash needs it for its writable data root (LSO / SharedObject, temporary
++  // files, FileReference). Flash is always allowed to use it in this build.
++  if (message.type() == PpapiHostMsg_FlashFile_Create::ID) {
++    scoped_refptr<ppapi::host::ResourceMessageFilter> flash_file_filter(
++        base::MakeRefCounted<PepperFlashFileMessageFilter>(instance, host_));
++    return std::unique_ptr<ppapi::host::ResourceHost>(
++        new ppapi::host::MessageFilterHost(host_->GetPpapiHost(), instance,
++                                           resource, flash_file_filter));
++  }
++
+   return nullptr;
+ }
+ 
+diff --git a/content/browser/renderer_host/pepper/pepper_flash_file_message_filter.cc b/content/browser/renderer_host/pepper/pepper_flash_file_message_filter.cc
+new file mode 100644
+index 0000000000000..91fdb336034a6
+--- /dev/null
++++ b/content/browser/renderer_host/pepper/pepper_flash_file_message_filter.cc
+@@ -0,0 +1,307 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h"
++
++#include <utility>
++
++#include "base/files/file.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
++#include "base/functional/bind.h"
++#include "base/task/thread_pool.h"
++#include "build/build_config.h"
++#include "content/browser/child_process_security_policy_impl.h"
++#include "content/browser/renderer_host/pepper/pepper_security_helper.h"
++#include "content/public/browser/browser_ppapi_host.h"
++#include "ipc/ipc_platform_file.h"
++#include "ppapi/c/pp_errors.h"
++#include "ppapi/host/dispatch_host_message.h"
++#include "ppapi/host/host_message_context.h"
++#include "ppapi/host/ppapi_host.h"
++#include "ppapi/proxy/ppapi_messages.h"
++#include "ppapi/shared_impl/dir_contents.h"
++#include "ppapi/shared_impl/file_path.h"
++#include "ppapi/shared_impl/file_type_conversion.h"
++
++namespace content {
++
++namespace {
++
++// Directory under the profile data directory where PPAPI plugin data lives.
++// Matches what Chrome used (<profile>/Pepper Data/<plugin name>).
++const char kPepperDataDirname[] = "Pepper Data";
++
++bool CanRead(int process_id, const base::FilePath& path) {
++  return ChildProcessSecurityPolicyImpl::GetInstance()->CanReadFile(process_id,
++                                                                    path);
++}
++
++bool CanCreateReadWrite(int process_id, const base::FilePath& path) {
++  return ChildProcessSecurityPolicyImpl::GetInstance()->CanCreateReadWriteFile(
++      process_id, path);
++}
++
++}  // namespace
++
++PepperFlashFileMessageFilter::PepperFlashFileMessageFilter(
++    PP_Instance instance,
++    BrowserPpapiHost* host)
++    : plugin_process_(host->GetPluginProcess().Duplicate()) {
++  int unused = 0;
++  host->GetRenderFrameIDsForInstance(instance, &render_process_id_, &unused);
++  base::FilePath profile_data_directory = host->GetProfileDataDirectory();
++  std::string plugin_name = host->GetPluginName();
++
++  if (profile_data_directory.empty() || plugin_name.empty()) {
++    // Without these we would build a wrong path and could give access to the
++    // wrong files. Leave |plugin_data_directory_| empty so that
++    // ValidateAndConvertPepperFilePath() fails closed (access denied) instead
++    // of crashing the browser.
++    LOG(ERROR) << "[flash-file] missing profile data dir (" <<
++        profile_data_directory << ") or plugin name (" << plugin_name
++               << "); Flash local storage will be unavailable";
++    return;
++  }
++
++  plugin_data_directory_ = GetDataDirName(profile_data_directory)
++                               .Append(base::FilePath::FromUTF8Unsafe(plugin_name));
++  LOG(INFO) << "[flash-file] plugin data dir = " << plugin_data_directory_;
++}
++
++PepperFlashFileMessageFilter::~PepperFlashFileMessageFilter() = default;
++
++// static
++base::FilePath PepperFlashFileMessageFilter::GetDataDirName(
++    const base::FilePath& profile_path) {
++  return profile_path.AppendASCII(kPepperDataDirname);
++}
++
++scoped_refptr<base::SequencedTaskRunner>
++PepperFlashFileMessageFilter::OverrideTaskRunnerForMessage(
++    const IPC::Message& msg) {
++  // File operations run on the blocking pool instead of a single thread, since
++  // the plugin sends these synchronously and cannot issue a new message until
++  // the current one returns.
++  return base::ThreadPool::CreateSequencedTaskRunner(
++      {base::MayBlock(), base::TaskPriority::USER_VISIBLE,
++       base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
++}
++
++int32_t PepperFlashFileMessageFilter::OnResourceMessageReceived(
++    const IPC::Message& msg,
++    ppapi::host::HostMessageContext* context) {
++  PPAPI_BEGIN_MESSAGE_MAP(PepperFlashFileMessageFilter, msg)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFile_OpenFile,
++                                      OnOpenFile)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFile_RenameFile,
++                                      OnRenameFile)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFile_DeleteFileOrDir,
++                                      OnDeleteFileOrDir)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFile_CreateDir,
++                                      OnCreateDir)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFile_QueryFile,
++                                      OnQueryFile)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFile_GetDirContents,
++                                      OnGetDirContents)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL_0(
++        PpapiHostMsg_FlashFile_CreateTemporaryFile, OnCreateTemporaryFile)
++  PPAPI_END_MESSAGE_MAP()
++  return PP_ERROR_FAILED;
++}
++
++int32_t PepperFlashFileMessageFilter::OnOpenFile(
++    ppapi::host::HostMessageContext* context,
++    const ppapi::PepperFilePath& path,
++    int pp_open_flags) {
++  base::FilePath full_path = ValidateAndConvertPepperFilePath(
++      path, base::BindRepeating(&CanOpenWithPepperFlags, pp_open_flags));
++  if (full_path.empty()) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  uint32_t platform_file_flags = 0;
++  if (!ppapi::PepperFileOpenFlagsToPlatformFileFlags(pp_open_flags,
++                                                     &platform_file_flags)) {
++    return base::File::FILE_ERROR_FAILED;
++  }
++
++  base::File file(full_path, platform_file_flags);
++  if (!file.IsValid())
++    return ppapi::FileErrorToPepperError(file.error_details());
++
++  // Make sure we didn't try to open a directory: directory fd shouldn't be
++  // passed to untrusted processes because they open security holes.
++  base::File::Info info;
++  if (!file.GetInfo(&info) || info.is_directory) {
++    // When in doubt, throw it out.
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  IPC::PlatformFileForTransit transit_file =
++      IPC::TakePlatformFileForTransit(std::move(file));
++  ppapi::host::ReplyMessageContext reply_context =
++      context->MakeReplyMessageContext();
++  reply_context.params.AppendHandle(ppapi::proxy::SerializedHandle(
++      ppapi::proxy::SerializedHandle::FILE, transit_file));
++  SendReply(reply_context, IPC::Message());
++  return PP_OK_COMPLETIONPENDING;
++}
++
++int32_t PepperFlashFileMessageFilter::OnRenameFile(
++    ppapi::host::HostMessageContext* context,
++    const ppapi::PepperFilePath& from_path,
++    const ppapi::PepperFilePath& to_path) {
++  base::FilePath from_full_path = ValidateAndConvertPepperFilePath(
++      from_path, base::BindRepeating(&CanCreateReadWrite));
++  base::FilePath to_full_path = ValidateAndConvertPepperFilePath(
++      to_path, base::BindRepeating(&CanCreateReadWrite));
++  if (from_full_path.empty() || to_full_path.empty()) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  bool result = base::Move(from_full_path, to_full_path);
++  return ppapi::FileErrorToPepperError(
++      result ? base::File::FILE_OK : base::File::FILE_ERROR_ACCESS_DENIED);
++}
++
++int32_t PepperFlashFileMessageFilter::OnDeleteFileOrDir(
++    ppapi::host::HostMessageContext* context,
++    const ppapi::PepperFilePath& path,
++    bool recursive) {
++  base::FilePath full_path = ValidateAndConvertPepperFilePath(
++      path, base::BindRepeating(&CanCreateReadWrite));
++  if (full_path.empty()) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  bool result = recursive ? base::DeletePathRecursively(full_path)
++                          : base::DeleteFile(full_path);
++  return ppapi::FileErrorToPepperError(
++      result ? base::File::FILE_OK : base::File::FILE_ERROR_ACCESS_DENIED);
++}
++
++int32_t PepperFlashFileMessageFilter::OnCreateDir(
++    ppapi::host::HostMessageContext* context,
++    const ppapi::PepperFilePath& path) {
++  base::FilePath full_path = ValidateAndConvertPepperFilePath(
++      path, base::BindRepeating(&CanCreateReadWrite));
++  if (full_path.empty()) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  bool result = base::CreateDirectory(full_path);
++  return ppapi::FileErrorToPepperError(
++      result ? base::File::FILE_OK : base::File::FILE_ERROR_ACCESS_DENIED);
++}
++
++int32_t PepperFlashFileMessageFilter::OnQueryFile(
++    ppapi::host::HostMessageContext* context,
++    const ppapi::PepperFilePath& path) {
++  base::FilePath full_path =
++      ValidateAndConvertPepperFilePath(path, base::BindRepeating(&CanRead));
++  if (full_path.empty()) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  base::File::Info info;
++  bool result = base::GetFileInfo(full_path, &info);
++  context->reply_msg = PpapiPluginMsg_FlashFile_QueryFileReply(info);
++  return ppapi::FileErrorToPepperError(
++      result ? base::File::FILE_OK : base::File::FILE_ERROR_ACCESS_DENIED);
++}
++
++int32_t PepperFlashFileMessageFilter::OnGetDirContents(
++    ppapi::host::HostMessageContext* context,
++    const ppapi::PepperFilePath& path) {
++  base::FilePath full_path =
++      ValidateAndConvertPepperFilePath(path, base::BindRepeating(&CanRead));
++  if (full_path.empty()) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  ppapi::DirContents contents;
++  base::FileEnumerator enumerator(full_path, false,
++                                  base::FileEnumerator::FILES |
++                                      base::FileEnumerator::DIRECTORIES |
++                                      base::FileEnumerator::INCLUDE_DOT_DOT);
++
++  for (base::FilePath name = enumerator.Next(); !name.empty();
++       name = enumerator.Next()) {
++    base::FileEnumerator::FileInfo info = enumerator.GetInfo();
++    ppapi::DirEntry entry;
++    entry.name = info.GetName();
++    entry.is_dir = info.IsDirectory();
++    contents.push_back(entry);
++  }
++
++  context->reply_msg = PpapiPluginMsg_FlashFile_GetDirContentsReply(contents);
++  return PP_OK;
++}
++
++int32_t PepperFlashFileMessageFilter::OnCreateTemporaryFile(
++    ppapi::host::HostMessageContext* context) {
++  ppapi::PepperFilePath dir_path(ppapi::PepperFilePath::DOMAIN_MODULE_LOCAL,
++                                 base::FilePath());
++  base::FilePath validated_dir_path = ValidateAndConvertPepperFilePath(
++      dir_path, base::BindRepeating(&CanCreateReadWrite));
++  if (validated_dir_path.empty() ||
++      (!base::DirectoryExists(validated_dir_path) &&
++       !base::CreateDirectory(validated_dir_path))) {
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_ACCESS_DENIED);
++  }
++
++  base::FilePath file_path;
++  if (!base::CreateTemporaryFileInDir(validated_dir_path, &file_path))
++    return ppapi::FileErrorToPepperError(base::File::FILE_ERROR_FAILED);
++
++  int file_flags = base::File::FLAG_CREATE_ALWAYS | base::File::FLAG_READ |
++                   base::File::FLAG_WRITE | base::File::FLAG_DELETE_ON_CLOSE;
++#if BUILDFLAG(IS_WIN)
++  file_flags |= base::File::FLAG_WIN_TEMPORARY;
++#endif
++  base::File file(file_path, file_flags);
++
++  if (!file.IsValid())
++    return ppapi::FileErrorToPepperError(file.error_details());
++
++  IPC::PlatformFileForTransit transit_file =
++      IPC::TakePlatformFileForTransit(std::move(file));
++  ppapi::host::ReplyMessageContext reply_context =
++      context->MakeReplyMessageContext();
++  reply_context.params.AppendHandle(ppapi::proxy::SerializedHandle(
++      ppapi::proxy::SerializedHandle::FILE, transit_file));
++  SendReply(reply_context, IPC::Message());
++  return PP_OK_COMPLETIONPENDING;
++}
++
++base::FilePath PepperFlashFileMessageFilter::ValidateAndConvertPepperFilePath(
++    const ppapi::PepperFilePath& pepper_path,
++    const CheckPermissionsCallback& check_permissions_callback) const {
++  base::FilePath file_path;  // Empty path returned on error.
++  switch (pepper_path.domain()) {
++    case ppapi::PepperFilePath::DOMAIN_ABSOLUTE:
++      if (pepper_path.path().IsAbsolute() &&
++          check_permissions_callback.Run(render_process_id_,
++                                         pepper_path.path()))
++        file_path = pepper_path.path();
++      break;
++    case ppapi::PepperFilePath::DOMAIN_MODULE_LOCAL:
++      // This filter provides the module name portion of the path to prevent
++      // plugins from accessing each other's data.
++      if (!plugin_data_directory_.empty() && !pepper_path.path().IsAbsolute() &&
++          !pepper_path.path().ReferencesParent())
++        file_path = plugin_data_directory_.Append(pepper_path.path());
++      break;
++    default:
++      // Fail closed instead of NOTREACHED(): an unexpected domain from the
++      // plugin must not take down the browser process.
++      LOG(ERROR) << "[flash-file] unexpected path domain "
++                 << static_cast<int>(pepper_path.domain());
++      break;
++  }
++  return file_path;
++}
++
++}  // namespace content
+diff --git a/content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h b/content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h
+new file mode 100644
+index 0000000000000..7e2e807207977
+--- /dev/null
++++ b/content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h
+@@ -0,0 +1,95 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// PPAPI revival: browser-side host for the Flash-private "FlashFile" API
++// (PPB_Flash_File / pp::FileModuleLocal). Chromium used to ship this in
++// content (see M80), it was removed long before 140; Flash still needs it for
++// its writable data root (LSO / SharedObject, FileReference, temporary files).
++
++#ifndef CONTENT_BROWSER_RENDERER_HOST_PEPPER_PEPPER_FLASH_FILE_MESSAGE_FILTER_H_
++#define CONTENT_BROWSER_RENDERER_HOST_PEPPER_PEPPER_FLASH_FILE_MESSAGE_FILTER_H_
++
++#include <stdint.h>
++
++#include "base/files/file_path.h"
++#include "base/functional/callback.h"
++#include "base/memory/ref_counted.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/process/process.h"
++#include "base/task/sequenced_task_runner.h"
++#include "ppapi/c/pp_instance.h"
++#include "ppapi/host/resource_host.h"
++#include "ppapi/host/resource_message_filter.h"
++
++namespace IPC {
++class Message;
++}
++
++namespace ppapi {
++class PepperFilePath;
++}
++
++namespace ppapi {
++namespace host {
++struct HostMessageContext;
++}  // namespace host
++}  // namespace ppapi
++
++namespace content {
++
++class BrowserPpapiHost;
++
++// Handles the Flash file messages on a blocking thread pool.
++class PepperFlashFileMessageFilter : public ppapi::host::ResourceMessageFilter {
++ public:
++  PepperFlashFileMessageFilter(PP_Instance instance, BrowserPpapiHost* host);
++
++  static base::FilePath GetDataDirName(const base::FilePath& profile_path);
++
++ private:
++  using CheckPermissionsCallback =
++      base::RepeatingCallback<bool(int, const base::FilePath&)>;
++
++  ~PepperFlashFileMessageFilter() override;
++
++  // ppapi::host::ResourceMessageFilter overrides.
++  scoped_refptr<base::SequencedTaskRunner> OverrideTaskRunnerForMessage(
++      const IPC::Message& msg) override;
++  int32_t OnResourceMessageReceived(
++      const IPC::Message& msg,
++      ppapi::host::HostMessageContext* context) override;
++
++  int32_t OnOpenFile(ppapi::host::HostMessageContext* context,
++                     const ppapi::PepperFilePath& path,
++                     int pp_open_flags);
++  int32_t OnRenameFile(ppapi::host::HostMessageContext* context,
++                       const ppapi::PepperFilePath& from_path,
++                       const ppapi::PepperFilePath& to_path);
++  int32_t OnDeleteFileOrDir(ppapi::host::HostMessageContext* context,
++                            const ppapi::PepperFilePath& path,
++                            bool recursive);
++  int32_t OnCreateDir(ppapi::host::HostMessageContext* context,
++                      const ppapi::PepperFilePath& path);
++  int32_t OnQueryFile(ppapi::host::HostMessageContext* context,
++                      const ppapi::PepperFilePath& path);
++  int32_t OnGetDirContents(ppapi::host::HostMessageContext* context,
++                           const ppapi::PepperFilePath& path);
++  int32_t OnCreateTemporaryFile(ppapi::host::HostMessageContext* context);
++
++  base::FilePath ValidateAndConvertPepperFilePath(
++      const ppapi::PepperFilePath& pepper_path,
++      const CheckPermissionsCallback& check_permissions_callback) const;
++
++  base::FilePath plugin_data_directory_;
++  int render_process_id_ = -1;
++  base::Process plugin_process_;
++
++  PepperFlashFileMessageFilter(const PepperFlashFileMessageFilter&) = delete;
++  PepperFlashFileMessageFilter& operator=(const PepperFlashFileMessageFilter&) =
++      delete;
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_RENDERER_HOST_PEPPER_PEPPER_FLASH_FILE_MESSAGE_FILTER_H_
+-- 
+2.55.0.windows.2
+
+
+From 31995f7b1ae7c7bdd243c614c84172dbca9ffe67 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 11:52:47 +0800
+Subject: [PATCH 04/11] =?UTF-8?q?feat(pepper):=20=E5=AE=9E=E7=8E=B0=20PPB?=
+ =?UTF-8?q?=5FFlash=5FFullscreen=20=E5=AE=BF=E4=B8=BB=20=E2=80=94=E2=80=94?=
+ =?UTF-8?q?=20Flash=20=E5=85=A8=E5=B1=8F=E6=81=A2=E5=A4=8D=E5=8F=AF?=
+ =?UTF-8?q?=E7=94=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+背景：Flash 29 走的是私有 PPB_Flash_Fullscreen（而不是标准 PPB_Fullscreen），
+消息发往渲染进程，但 140 移植里没有对应 host，全屏请求被静默吞掉：
+AS3 侧 stage.displayState 保持 normal、收不到 FULL_SCREEN 事件。
+
+改动：
+1. content/public/renderer/pepper_plugin_instance.h：
+   新增 FlashSetFullscreen(bool, bool delay_report) 纯虚接口（M80 曾有，Flash 移除后删除）。
+2. pepper_plugin_instance_impl.{h,cc}：实现 FlashSetFullscreen —— 已在目标状态则返回 true，
+   否则转调标准 SetFullscreen()（走 container_->RequestFullscreen() 的 HTML5 全屏路径）。
+3. 新增 content/renderer/pepper/pepper_flash_fullscreen_host.{h,cc}
+   （从 Chromium M80 的同名实现移植），处理 PpapiHostMsg_FlashFullscreen_SetFullscreen。
+4. content_renderer_pepper_host_factory.cc：注册 PpapiHostMsg_FlashFullscreen_Create。
+5. content/renderer/BUILD.gn：加入新源文件。
+
+验证（Flash 29.0.0.171 / Chromium 140，真实鼠标点击）：
+- 带 allowfullscreen：日志出现 FlashSetFullscreen(1, delay=1) → SetFullscreen(1)，
+  窗口从 900x700 变成 1707x1067 @ (0,0)（= 屏幕尺寸），即真正进入全屏。
+- 对照（不加 allowfullscreen）：窗口保持 900x700，且没有任何 FlashSetFullscreen 调用
+  （Flash 自己抛 Error #2152），说明变化确实来自本次实现。
+---
+ .../public/renderer/pepper_plugin_instance.h  |  5 ++
+ content/renderer/BUILD.gn                     |  2 +
+ .../content_renderer_pepper_host_factory.cc   |  8 ++++
+ .../pepper/pepper_flash_fullscreen_host.cc    | 46 ++++++++++++++++++
+ .../pepper/pepper_flash_fullscreen_host.h     | 47 +++++++++++++++++++
+ .../pepper/pepper_plugin_instance_impl.cc     | 19 ++++++++
+ .../pepper/pepper_plugin_instance_impl.h      |  5 ++
+ 7 files changed, 132 insertions(+)
+ create mode 100644 content/renderer/pepper/pepper_flash_fullscreen_host.cc
+ create mode 100644 content/renderer/pepper/pepper_flash_fullscreen_host.h
+
+diff --git a/content/public/renderer/pepper_plugin_instance.h b/content/public/renderer/pepper_plugin_instance.h
+index b79593b418213..8150b76c802d8 100644
+--- a/content/public/renderer/pepper_plugin_instance.h
++++ b/content/public/renderer/pepper_plugin_instance.h
+@@ -91,6 +91,11 @@ class PepperPluginInstance {
+ 
+   virtual bool IsRectTopmost(const gfx::Rect& rect) = 0;
+ 
++  // Flash-specific fullscreen entry point (PPB_Flash_Fullscreen). Flash calls
++  // this instead of the standard PPB_Fullscreen API. Returns true if the
++  // request was accepted (or the instance is already in the target state).
++  virtual bool FlashSetFullscreen(bool fullscreen, bool delay_report) = 0;
++
+   // Creates a pending PepperFileRefRendererHost. Returns 0 on failure.
+   virtual int MakePendingFileRefRendererHost(const base::FilePath& path) = 0;
+ 
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+index ab2bc50dcc45c..e2b97224e4451 100644
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -473,6 +473,8 @@ target(link_target_type, "renderer") {
+         "pepper/pepper_file_ref_renderer_host.h",
+         "pepper/pepper_file_system_host.cc",
+         "pepper/pepper_file_system_host.h",
++        "pepper/pepper_flash_fullscreen_host.cc",
++        "pepper/pepper_flash_fullscreen_host.h",
+         "pepper/pepper_graphics_2d_host.cc",
+         "pepper/pepper_graphics_2d_host.h",
+         "pepper/pepper_hung_plugin_filter.cc",
+diff --git a/content/renderer/pepper/content_renderer_pepper_host_factory.cc b/content/renderer/pepper/content_renderer_pepper_host_factory.cc
+index 4465917c3572c..3fa88f7a5efac 100644
+--- a/content/renderer/pepper/content_renderer_pepper_host_factory.cc
++++ b/content/renderer/pepper/content_renderer_pepper_host_factory.cc
+@@ -21,6 +21,7 @@
+ #include "content/renderer/pepper/pepper_file_chooser_host.h"
+ #include "content/renderer/pepper/pepper_file_ref_renderer_host.h"
+ #include "content/renderer/pepper/pepper_file_system_host.h"
++#include "content/renderer/pepper/pepper_flash_fullscreen_host.h"
+ #include "content/renderer/pepper/pepper_graphics_2d_host.h"
+ #include "content/renderer/pepper/pepper_media_stream_video_track_host.h"
+ #include "content/renderer/pepper/pepper_plugin_instance_impl.h"
+@@ -175,6 +176,13 @@ ContentRendererPepperHostFactory::CreateResourceHost(
+     return camera_host->Init() ? std::move(camera_host) : nullptr;
+   }
+ 
++  // PPAPI revival: Flash-private fullscreen API (PPB_Flash_Fullscreen).
++  // Flash 29 uses this instead of the standard PPB_Fullscreen entry point.
++  if (message.type() == PpapiHostMsg_FlashFullscreen_Create::ID) {
++    return std::unique_ptr<ppapi::host::ResourceHost>(
++        new PepperFlashFullscreenHost(host_, instance, resource));
++  }
++
+   return nullptr;
+ }
+ 
+diff --git a/content/renderer/pepper/pepper_flash_fullscreen_host.cc b/content/renderer/pepper/pepper_flash_fullscreen_host.cc
+new file mode 100644
+index 0000000000000..181039e546eec
+--- /dev/null
++++ b/content/renderer/pepper/pepper_flash_fullscreen_host.cc
+@@ -0,0 +1,46 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/renderer/pepper/pepper_flash_fullscreen_host.h"
++
++#include "content/public/renderer/pepper_plugin_instance.h"
++#include "content/public/renderer/renderer_ppapi_host.h"
++#include "ppapi/c/pp_errors.h"
++#include "ppapi/host/dispatch_host_message.h"
++#include "ppapi/host/host_message_context.h"
++#include "ppapi/host/ppapi_host.h"
++#include "ppapi/proxy/ppapi_messages.h"
++
++namespace content {
++
++PepperFlashFullscreenHost::PepperFlashFullscreenHost(RendererPpapiHost* host,
++                                                     PP_Instance instance,
++                                                     PP_Resource resource)
++    : ResourceHost(host->GetPpapiHost(), instance, resource),
++      renderer_ppapi_host_(host) {}
++
++PepperFlashFullscreenHost::~PepperFlashFullscreenHost() = default;
++
++int32_t PepperFlashFullscreenHost::OnResourceMessageReceived(
++    const IPC::Message& msg,
++    ppapi::host::HostMessageContext* context) {
++  PPAPI_BEGIN_MESSAGE_MAP(PepperFlashFullscreenHost, msg)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(
++        PpapiHostMsg_FlashFullscreen_SetFullscreen, OnSetFullscreen)
++  PPAPI_END_MESSAGE_MAP()
++  return PP_ERROR_FAILED;
++}
++
++int32_t PepperFlashFullscreenHost::OnSetFullscreen(
++    ppapi::host::HostMessageContext* context,
++    bool fullscreen) {
++  PepperPluginInstance* plugin_instance =
++      renderer_ppapi_host_->GetPluginInstance(pp_instance());
++  if (plugin_instance &&
++      plugin_instance->FlashSetFullscreen(fullscreen, true /* delay_report */))
++    return PP_OK;
++  return PP_ERROR_FAILED;
++}
++
++}  // namespace content
+diff --git a/content/renderer/pepper/pepper_flash_fullscreen_host.h b/content/renderer/pepper/pepper_flash_fullscreen_host.h
+new file mode 100644
+index 0000000000000..3bd6d28e4444e
+--- /dev/null
++++ b/content/renderer/pepper/pepper_flash_fullscreen_host.h
+@@ -0,0 +1,47 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// PPAPI revival: renderer-side host for the Flash-private fullscreen API
++// (PPB_Flash_Fullscreen). Ported from Chromium M80
++// (chrome/renderer/pepper/pepper_flash_fullscreen_host.cc) because Flash 29
++// uses this API instead of the standard PPB_Fullscreen.
++
++#ifndef CONTENT_RENDERER_PEPPER_PEPPER_FLASH_FULLSCREEN_HOST_H_
++#define CONTENT_RENDERER_PEPPER_PEPPER_FLASH_FULLSCREEN_HOST_H_
++
++#include <stdint.h>
++
++#include "base/memory/weak_ptr.h"
++#include "ppapi/host/resource_host.h"
++
++namespace content {
++
++class RendererPpapiHost;
++
++class PepperFlashFullscreenHost : public ppapi::host::ResourceHost {
++ public:
++  PepperFlashFullscreenHost(RendererPpapiHost* host,
++                            PP_Instance instance,
++                            PP_Resource resource);
++  ~PepperFlashFullscreenHost() override;
++
++  // ppapi::host::ResourceHost overrides.
++  int32_t OnResourceMessageReceived(
++      const IPC::Message& msg,
++      ppapi::host::HostMessageContext* context) override;
++
++ private:
++  int32_t OnSetFullscreen(ppapi::host::HostMessageContext* context,
++                          bool fullscreen);
++
++  raw_ptr<RendererPpapiHost> renderer_ppapi_host_;
++
++  PepperFlashFullscreenHost(const PepperFlashFullscreenHost&) = delete;
++  PepperFlashFullscreenHost& operator=(const PepperFlashFullscreenHost&) =
++      delete;
++};
++
++}  // namespace content
++
++#endif  // CONTENT_RENDERER_PEPPER_PEPPER_FLASH_FULLSCREEN_HOST_H_
+diff --git a/content/renderer/pepper/pepper_plugin_instance_impl.cc b/content/renderer/pepper/pepper_plugin_instance_impl.cc
+index 8b8abd814f4c4..cb2ea0c803d09 100644
+--- a/content/renderer/pepper/pepper_plugin_instance_impl.cc
++++ b/content/renderer/pepper/pepper_plugin_instance_impl.cc
+@@ -1718,7 +1718,26 @@ bool PepperPluginInstanceImpl::IsFullscreenOrPending() {
+   return desired_fullscreen_state_;
+ }
+ 
++bool PepperPluginInstanceImpl::FlashSetFullscreen(bool fullscreen,
++                                                   bool delay_report) {
++  TRACE_EVENT0("ppapi", "PepperPluginInstanceImpl::FlashSetFullscreen");
++  LOG(ERROR) << "[ppexp] FlashSetFullscreen(" << fullscreen
++             << ", delay=" << delay_report << ")";
++  // Keep a reference on the stack. See NOTE above.
++  scoped_refptr<PepperPluginInstanceImpl> ref(this);
++
++  // Already in (or switching to) the requested state.
++  if (fullscreen == IsFullscreenOrPending())
++    return true;
++
++  // Flash's private fullscreen API funnels into the standard HTML5 fullscreen
++  // path: the plugin element gets fullscreened and Flash is told about the
++  // geometry change, which is what stage.displayState expects.
++  return SetFullscreen(fullscreen);
++}
++
+ bool PepperPluginInstanceImpl::SetFullscreen(bool fullscreen) {
++  LOG(ERROR) << "[ppexp] SetFullscreen(" << fullscreen << ")";
+   // Keep a reference on the stack. See NOTE above.
+   scoped_refptr<PepperPluginInstanceImpl> ref(this);
+ 
+diff --git a/content/renderer/pepper/pepper_plugin_instance_impl.h b/content/renderer/pepper/pepper_plugin_instance_impl.h
+index 2b8d37c1e65b1..48b26b6d88900 100644
+--- a/content/renderer/pepper/pepper_plugin_instance_impl.h
++++ b/content/renderer/pepper/pepper_plugin_instance_impl.h
+@@ -301,6 +301,11 @@ class CONTENT_EXPORT PepperPluginInstanceImpl
+   // mode).
+   bool SetFullscreen(bool fullscreen);
+ 
++  // Flash-specific fullscreen entry point (PPB_Flash_Fullscreen). Flash calls
++  // this instead of the standard PPB_Fullscreen API. |delay_report| is honored
++  // by reporting the geometry asynchronously when leaving fullscreen.
++  bool FlashSetFullscreen(bool fullscreen, bool delay_report) override;
++
+   // Send the message on to the plugin.
+   void HandleMessage(ppapi::ScopedPPVar message);
+ 
+-- 
+2.55.0.windows.2
+
+
+From b0bf0b28c235a53c01715dc7a89d20a6bcc857a3 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 12:09:48 +0800
+Subject: [PATCH 05/11] =?UTF-8?q?feat(pepper):=20=E5=AE=9E=E7=8E=B0=20PPB?=
+ =?UTF-8?q?=5FFlash=20=E5=8D=95=E4=BE=8B=E5=AE=BF=E4=B8=BB=EF=BC=88?=
+ =?UTF-8?q?=E6=B8=B2=E6=9F=93=E8=BF=9B=E7=A8=8B=E4=BE=A7=EF=BC=89=E2=80=94?=
+ =?UTF-8?q?=E2=80=94=20navigateToURL=20/=20=E7=BD=AE=E9=A1=B6=20/=20?=
+ =?UTF-8?q?=E5=91=BD=E4=B8=AD=E6=B5=8B=E8=AF=95=E6=81=A2=E5=A4=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+背景：Flash 通过 PPB_Flash 单例发的 9 类消息（GetProxyForURL/Navigate/
+SetInstanceAlwaysOnTop/IsRectTopmost/InvokePrinting/DrawGlyphs…）在 140 移植里
+没有宿主，全部被丢弃：navigateToURL 打不开链接、置顶弹窗无效、命中测试失败。
+（其中 UpdateActivity / GetLocalDataRestrictions 走 BROWSER 目标，本次未覆盖。）
+
+改动：
+1. content/public/renderer/pepper_plugin_instance.h：新增 Navigate(...) 纯虚接口
+   （M80 曾有，Flash 移除时一并删掉）；pepper_plugin_instance_impl.{h,cc} 实现：
+   用 CreateWebURLRequest() 构造请求 -> 只允许 GET/POST -> container_->LoadFrameRequest()；
+   javascript: URL 直接拒绝（Blink 已删 WebPluginContainer::ExecuteScriptURL）。
+2. 新增 content/renderer/pepper/pepper_flash_renderer_host.{h,cc}
+   （移植自 Chromium M80 的 chrome/renderer/pepper/pepper_flash_renderer_host.cc）：
+   * SetInstanceAlwaysOnTop -> PepperPluginInstance::SetAlwaysOnTop
+   * Navigate -> PepperPluginInstance::Navigate（保留 M80 的 re-entrancy 处理与
+     navigate_replies_ 兜底，实例被销毁时仍会回包，避免阻塞插件进程）
+   * IsRectTopmost -> PepperPluginInstance::IsRectTopmost
+   * InvokePrinting -> 记录日志并返回 PP_OK（打印未实现）
+   * GetProxyForURL -> 返回 PP_ERROR_FAILED（140 删除了
+     content::RenderThread::ResolveProxy()，渲染进程拿不到 proxy resolver；
+     Flash 的 HTTP 仍走 PPB_URLLoader，代理照常生效）
+   * DrawGlyphs 未实现（M80 依赖 PPB_ImageData_API::GetCanvas()，本树已无该接口；
+     Flash 的常规文字走 Graphics2D，不受影响）
+3. content_renderer_pepper_host_factory.cc + content/renderer/BUILD.gn：注册
+   PpapiHostMsg_Flash_Create 并加入源文件。
+
+验证（Flash 29.0.0.171 / Chromium 140）：
+- 新探针 NavigateProbe（AS3 navigateToURL 到 probe.txt?from=flash）：
+  chrome.log 出现真实导航请求 GET /probe.txt?from=flash，说明 Navigate 全链路打通。
+- Canabalt：ppexp 从 342 行（Flash_Create x2 + SetInstanceAlwaysOnTop x1）降到
+  Flash_Create x1（只剩 BROWSER 侧那次，符合预期）+ 341 条非 Flash 消息；
+  interactive=3，无崩溃。
+---
+ .../public/renderer/pepper_plugin_instance.h  |   7 +
+ content/renderer/BUILD.gn                     |   2 +
+ .../content_renderer_pepper_host_factory.cc   |   8 ++
+ .../pepper/pepper_flash_renderer_host.cc      | 133 ++++++++++++++++++
+ .../pepper/pepper_flash_renderer_host.h       |  70 +++++++++
+ .../pepper/pepper_plugin_instance_impl.cc     |  38 +++++
+ .../pepper/pepper_plugin_instance_impl.h      |   5 +
+ 7 files changed, 263 insertions(+)
+ create mode 100644 content/renderer/pepper/pepper_flash_renderer_host.cc
+ create mode 100644 content/renderer/pepper/pepper_flash_renderer_host.h
+
+diff --git a/content/public/renderer/pepper_plugin_instance.h b/content/public/renderer/pepper_plugin_instance.h
+index 8150b76c802d8..08c535deec81c 100644
+--- a/content/public/renderer/pepper_plugin_instance.h
++++ b/content/public/renderer/pepper_plugin_instance.h
+@@ -31,6 +31,7 @@ class Rect;
+ namespace ppapi {
+ class PpapiPermissions;
+ class VarTracker;
++struct URLRequestInfoData;
+ }
+ 
+ namespace IPC {
+@@ -91,6 +92,12 @@ class PepperPluginInstance {
+ 
+   virtual bool IsRectTopmost(const gfx::Rect& rect) = 0;
+ 
++  // Navigates the plugin's frame (PPB_Flash::Navigate). |target| is the frame
++  // target name (empty means the current frame). Returns PP_OK on success.
++  virtual int32_t Navigate(const ppapi::URLRequestInfoData& request,
++                           const char* target,
++                           bool from_user_action) = 0;
++
+   // Flash-specific fullscreen entry point (PPB_Flash_Fullscreen). Flash calls
+   // this instead of the standard PPB_Fullscreen API. Returns true if the
+   // request was accepted (or the instance is already in the target state).
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+index e2b97224e4451..9cc4f823f20cd 100644
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -475,6 +475,8 @@ target(link_target_type, "renderer") {
+         "pepper/pepper_file_system_host.h",
+         "pepper/pepper_flash_fullscreen_host.cc",
+         "pepper/pepper_flash_fullscreen_host.h",
++        "pepper/pepper_flash_renderer_host.cc",
++        "pepper/pepper_flash_renderer_host.h",
+         "pepper/pepper_graphics_2d_host.cc",
+         "pepper/pepper_graphics_2d_host.h",
+         "pepper/pepper_hung_plugin_filter.cc",
+diff --git a/content/renderer/pepper/content_renderer_pepper_host_factory.cc b/content/renderer/pepper/content_renderer_pepper_host_factory.cc
+index 3fa88f7a5efac..a335454c381a8 100644
+--- a/content/renderer/pepper/content_renderer_pepper_host_factory.cc
++++ b/content/renderer/pepper/content_renderer_pepper_host_factory.cc
+@@ -22,6 +22,7 @@
+ #include "content/renderer/pepper/pepper_file_ref_renderer_host.h"
+ #include "content/renderer/pepper/pepper_file_system_host.h"
+ #include "content/renderer/pepper/pepper_flash_fullscreen_host.h"
++#include "content/renderer/pepper/pepper_flash_renderer_host.h"
+ #include "content/renderer/pepper/pepper_graphics_2d_host.h"
+ #include "content/renderer/pepper/pepper_media_stream_video_track_host.h"
+ #include "content/renderer/pepper/pepper_plugin_instance_impl.h"
+@@ -183,6 +184,13 @@ ContentRendererPepperHostFactory::CreateResourceHost(
+         new PepperFlashFullscreenHost(host_, instance, resource));
+   }
+ 
++  // PPAPI revival: Flash-private PPB_Flash singleton (proxy lookup, navigate,
++  // always-on-top, hit testing, printing).
++  if (message.type() == PpapiHostMsg_Flash_Create::ID) {
++    return std::unique_ptr<ppapi::host::ResourceHost>(
++        new PepperFlashRendererHost(host_, instance, resource));
++  }
++
+   return nullptr;
+ }
+ 
+diff --git a/content/renderer/pepper/pepper_flash_renderer_host.cc b/content/renderer/pepper/pepper_flash_renderer_host.cc
+new file mode 100644
+index 0000000000000..7b87d13539955
+--- /dev/null
++++ b/content/renderer/pepper/pepper_flash_renderer_host.cc
+@@ -0,0 +1,133 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/renderer/pepper/pepper_flash_renderer_host.h"
++
++#include <stddef.h>
++
++#include "content/public/renderer/pepper_plugin_instance.h"
++#include "content/public/renderer/renderer_ppapi_host.h"
++#include "ppapi/c/pp_errors.h"
++#include "ppapi/host/dispatch_host_message.h"
++#include "ppapi/host/host_message_context.h"
++#include "ppapi/host/ppapi_host.h"
++#include "ppapi/proxy/host_dispatcher.h"
++#include "ppapi/proxy/ppapi_messages.h"
++#include "ppapi/proxy/serialized_structs.h"
++#include "ppapi/shared_impl/url_request_info_data.h"
++#include "ui/gfx/geometry/rect.h"
++
++PepperFlashRendererHost::PepperFlashRendererHost(
++    content::RendererPpapiHost* host,
++    PP_Instance instance,
++    PP_Resource resource)
++    : ResourceHost(host->GetPpapiHost(), instance, resource), host_(host) {}
++
++PepperFlashRendererHost::~PepperFlashRendererHost() {
++  // This object may be destroyed while a Navigate is in flight (it is a sync
++  // call which can re-enter and destroy the instance). Reply to any outstanding
++  // messages so the plugin process does not stay blocked.
++  for (size_t i = 0; i < navigate_replies_.size(); ++i)
++    SendReply(navigate_replies_[i], IPC::Message());
++  navigate_replies_.clear();
++}
++
++int32_t PepperFlashRendererHost::OnResourceMessageReceived(
++    const IPC::Message& msg,
++    ppapi::host::HostMessageContext* context) {
++  PPAPI_BEGIN_MESSAGE_MAP(PepperFlashRendererHost, msg)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_Flash_GetProxyForURL,
++                                      OnGetProxyForURL)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_Flash_SetInstanceAlwaysOnTop,
++                                      OnSetInstanceAlwaysOnTop)
++
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_Flash_Navigate, OnNavigate)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_Flash_IsRectTopmost,
++                                      OnIsRectTopmost)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL_0(PpapiHostMsg_Flash_InvokePrinting,
++                                        OnInvokePrinting)
++  PPAPI_END_MESSAGE_MAP()
++  return PP_ERROR_FAILED;
++}
++
++int32_t PepperFlashRendererHost::OnGetProxyForURL(
++    ppapi::host::HostMessageContext* host_context,
++    const std::string& url) {
++  // Chromium 140 removed content::RenderThread::ResolveProxy() (proxy
++  // resolution moved to the network service), and this renderer has no direct
++  // handle to a proxy resolver. Reporting failure makes Flash fall back to its
++  // own behaviour, which is what happened before this host existed. Flash's
++  // actual HTTP traffic still goes through PPB_URLLoader and therefore still
++  // picks up the embedder's proxy configuration.
++  LOG(ERROR) << "[flash] GetProxyForURL unsupported for " << url;
++  return PP_ERROR_FAILED;
++}
++
++int32_t PepperFlashRendererHost::OnSetInstanceAlwaysOnTop(
++    ppapi::host::HostMessageContext* host_context,
++    bool on_top) {
++  content::PepperPluginInstance* plugin_instance =
++      host_->GetPluginInstance(pp_instance());
++  if (plugin_instance)
++    plugin_instance->SetAlwaysOnTop(on_top);
++  // Since no reply is sent for this message, it doesn't make sense to return an
++  // error.
++  return PP_OK;
++}
++
++
++int32_t PepperFlashRendererHost::OnNavigate(
++    ppapi::host::HostMessageContext* host_context,
++    const ppapi::URLRequestInfoData& data,
++    const std::string& target,
++    bool from_user_action) {
++  // If our PepperPluginInstance is already destroyed, just return a failure.
++  content::PepperPluginInstance* plugin_instance =
++      host_->GetPluginInstance(pp_instance());
++  if (!plugin_instance)
++    return PP_ERROR_FAILED;
++
++  // Navigate may call into JavaScript (e.g. with a "javascript:" URL) or
++  // navigate the page away, either of which re-enters the plugin. That is
++  // expected behaviour (equivalent to NPN_GetURL).
++  ppapi::proxy::HostDispatcher* host_dispatcher =
++      ppapi::proxy::HostDispatcher::GetForInstance(pp_instance());
++  if (host_dispatcher)
++    host_dispatcher->set_allow_plugin_reentrancy();
++
++  // Grab a weak pointer so we can tell whether we survived the Navigate call.
++  base::WeakPtr<PepperFlashRendererHost> weak_ptr = weak_factory_.GetWeakPtr();
++  navigate_replies_.push_back(host_context->MakeReplyMessageContext());
++  plugin_instance->Navigate(data, target.c_str(), from_user_action);
++  // This object may have been destroyed by this point; if so the reply is sent
++  // from the destructor.
++  if (weak_ptr.get()) {
++    SendReply(navigate_replies_.back(), IPC::Message());
++    navigate_replies_.pop_back();
++  }
++
++  // Return PP_OK_COMPLETIONPENDING so no automatic reply is sent.
++  return PP_OK_COMPLETIONPENDING;
++}
++
++int32_t PepperFlashRendererHost::OnIsRectTopmost(
++    ppapi::host::HostMessageContext* host_context,
++    const PP_Rect& rect) {
++  content::PepperPluginInstance* plugin_instance =
++      host_->GetPluginInstance(pp_instance());
++  if (plugin_instance &&
++      plugin_instance->IsRectTopmost(gfx::Rect(
++          rect.point.x, rect.point.y, rect.size.width, rect.size.height)))
++    return PP_OK;
++  return PP_ERROR_FAILED;
++}
++
++int32_t PepperFlashRendererHost::OnInvokePrinting(
++    ppapi::host::HostMessageContext* host_context) {
++  // Flash's print dialog is not implemented in this build (Chrome used the PDF
++  // component for this, which content does not ship). Report success so the
++  // plugin keeps running; nothing is printed.
++  LOG(ERROR) << "[flash] InvokePrinting ignored (not implemented)";
++  return PP_OK;
++}
+diff --git a/content/renderer/pepper/pepper_flash_renderer_host.h b/content/renderer/pepper/pepper_flash_renderer_host.h
+new file mode 100644
+index 0000000000000..c1f1f3b1eff77
+--- /dev/null
++++ b/content/renderer/pepper/pepper_flash_renderer_host.h
+@@ -0,0 +1,70 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// PPAPI revival: renderer-side host for the Flash-private PPB_Flash singleton
++// (GetProxyForURL / SetInstanceAlwaysOnTop / Navigate / IsRectTopmost /
++// InvokePrinting / DrawGlyphs). Ported from Chromium M80
++// (chrome/renderer/pepper/pepper_flash_renderer_host.cc); Chromium had already
++// dropped the chrome-layer implementation before PPAPI itself was removed.
++
++#ifndef CONTENT_RENDERER_PEPPER_PEPPER_FLASH_RENDERER_HOST_H_
++#define CONTENT_RENDERER_PEPPER_PEPPER_FLASH_RENDERER_HOST_H_
++
++#include <stdint.h>
++
++#include <string>
++#include <vector>
++
++#include "base/memory/weak_ptr.h"
++#include "ppapi/host/resource_host.h"
++
++struct PP_Rect;
++
++namespace ppapi {
++struct URLRequestInfoData;
++}
++
++namespace content {
++class RendererPpapiHost;
++}
++
++class PepperFlashRendererHost : public ppapi::host::ResourceHost {
++ public:
++  PepperFlashRendererHost(content::RendererPpapiHost* host,
++                          PP_Instance instance,
++                          PP_Resource resource);
++  ~PepperFlashRendererHost() override;
++
++  // ppapi::host::ResourceHost overrides.
++  int32_t OnResourceMessageReceived(
++      const IPC::Message& msg,
++      ppapi::host::HostMessageContext* context) override;
++
++ private:
++  int32_t OnGetProxyForURL(ppapi::host::HostMessageContext* host_context,
++                           const std::string& url);
++  int32_t OnSetInstanceAlwaysOnTop(
++      ppapi::host::HostMessageContext* host_context,
++      bool on_top);
++
++  int32_t OnNavigate(ppapi::host::HostMessageContext* host_context,
++                     const ppapi::URLRequestInfoData& data,
++                     const std::string& target,
++                     bool from_user_action);
++  int32_t OnIsRectTopmost(ppapi::host::HostMessageContext* host_context,
++                          const PP_Rect& rect);
++  int32_t OnInvokePrinting(ppapi::host::HostMessageContext* host_context);
++
++  // A stack of ReplyMessageContexts to track Navigate() calls which have not
++  // yet been replied to.
++  std::vector<ppapi::host::ReplyMessageContext> navigate_replies_;
++
++  raw_ptr<content::RendererPpapiHost> host_;
++  base::WeakPtrFactory<PepperFlashRendererHost> weak_factory_{this};
++
++  PepperFlashRendererHost(const PepperFlashRendererHost&) = delete;
++  PepperFlashRendererHost& operator=(const PepperFlashRendererHost&) = delete;
++};
++
++#endif  // CONTENT_RENDERER_PEPPER_PEPPER_FLASH_RENDERER_HOST_H_
+diff --git a/content/renderer/pepper/pepper_plugin_instance_impl.cc b/content/renderer/pepper/pepper_plugin_instance_impl.cc
+index cb2ea0c803d09..ff76ca821fccc 100644
+--- a/content/renderer/pepper/pepper_plugin_instance_impl.cc
++++ b/content/renderer/pepper/pepper_plugin_instance_impl.cc
+@@ -2588,6 +2588,44 @@ bool PepperPluginInstanceImpl::IsRectTopmost(const gfx::Rect& rect) {
+   return container_->IsRectTopmost(rect);
+ }
+ 
++int32_t PepperPluginInstanceImpl::Navigate(
++    const ppapi::URLRequestInfoData& request,
++    const char* target,
++    bool from_user_action) {
++  if (!container_)
++    return PP_ERROR_FAILED;
++
++  blink::WebDocument document = container_->GetDocument();
++  blink::WebLocalFrame* frame = document.GetFrame();
++  if (!frame)
++    return PP_ERROR_FAILED;
++
++  ppapi::URLRequestInfoData completed_request = request;
++  blink::WebURLRequest web_request;
++  if (!CreateWebURLRequest(pp_instance(), &completed_request, frame,
++                           &web_request)) {
++    return PP_ERROR_FAILED;
++  }
++  web_request.SetSiteForCookies(document.SiteForCookies());
++  if (HasTransientUserActivation())
++    web_request.SetHasUserGesture(true);
++
++  GURL gurl(web_request.Url());
++  if (gurl.SchemeIs(url::kJavaScriptScheme)) {
++    // Flash's PPB_Flash::Navigate does not support javascript: URLs; Blink no
++    // longer exposes WebPluginContainer::ExecuteScriptURL (used by M80), so
++    // reject the request outright instead of executing script.
++    return PP_ERROR_NOACCESS;
++  }
++
++  // Only GETs and POSTs are supported.
++  if (web_request.HttpMethod() != "GET" && web_request.HttpMethod() != "POST")
++    return PP_ERROR_BADARGUMENT;
++
++  container_->LoadFrameRequest(web_request, blink::WebString::FromUTF8(target));
++  return PP_OK;
++}
++
+ int PepperPluginInstanceImpl::MakePendingFileRefRendererHost(
+     const base::FilePath& path) {
+   RendererPpapiHostImpl* host_impl = module_->renderer_ppapi_host();
+diff --git a/content/renderer/pepper/pepper_plugin_instance_impl.h b/content/renderer/pepper/pepper_plugin_instance_impl.h
+index 48b26b6d88900..a9acf600f2dfb 100644
+--- a/content/renderer/pepper/pepper_plugin_instance_impl.h
++++ b/content/renderer/pepper/pepper_plugin_instance_impl.h
+@@ -365,6 +365,11 @@ class CONTENT_EXPORT PepperPluginInstanceImpl
+   void SetAlwaysOnTop(bool on_top) override;
+   bool IsFullPagePlugin() override;
+   bool IsRectTopmost(const gfx::Rect& rect) override;
++
++  // PPB_Flash::Navigate entry point.
++  int32_t Navigate(const ppapi::URLRequestInfoData& request,
++                   const char* target,
++                   bool from_user_action) override;
+   int MakePendingFileRefRendererHost(const base::FilePath& path) override;
+   void SetEmbedProperty(PP_Var key, PP_Var value) override;
+   void SetSelectedText(const std::u16string& selected_text) override;
+-- 
+2.55.0.windows.2
+
+
+From c481fddadcc25e3be667a9e24566b00ee7394070 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 12:29:31 +0800
+Subject: [PATCH 06/11] =?UTF-8?q?feat(pepper):=20=E8=A1=A5=E9=BD=90=20Flas?=
+ =?UTF-8?q?h=20=E7=A7=81=E6=9C=89=20API=20=E7=9A=84=E5=B0=8F=E4=BB=B6=20?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=20=E6=B5=8F=E8=A7=88=E5=99=A8=E4=BE=A7=20Fla?=
+ =?UTF-8?q?sh=20host=20+=20FontFile=20host?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+本轮把"零散缺口"先收掉，避免后续大改动（Stage3D）把它们冲掉。
+
+1. 浏览器侧 PPB_Flash host（新增 pepper_flash_browser_host.{h,cc}）：
+   * Flash_UpdateActivity        -> no-op（content 没有 wake lock，仅影响省电）
+   * Flash_GetLocalTimeZoneOffset-> ppapi::PPGetLocalTimeZoneOffset()
+   * Flash_GetLocalDataRestrictions -> 回复"无限制"（content 没有 CookieSettings）
+   * 在 ContentBrowserPepperHostFactory 注册 PpapiHostMsg_Flash_Create
+   -> 至此 Flash 发往 BROWSER 的那次 Flash_Create 也不再失败。
+
+2. 渲染侧 PPB_Flash_FontFile host（新增 pepper_flash_font_file_host.{h,cc}）：
+   * 用 skia::DefaultFontMgr()->matchFamilyStyle() 匹配字体，
+     typeface_->getTableSize()/getTableData() 读 OpenType 表（tag 按大端字节序）
+   * 在 ContentRendererPepperHostFactory 注册 PpapiHostMsg_FlashFontFile_Create
+   -> Flash 的嵌入字体（很多中文页游使用）可以真正加载字体表。
+
+3. 两个 BUILD.gn 加入新源文件。
+
+验证（Flash 29.0.0.171 / Chromium 140）：
+- Canabalt：[ppexp] 只剩 337 条 non-Flash（SetCursor / PPBCore_ReleaseResource /
+  Graphics3D_Resize），**Flash_* 与 FlashFile_* 的失败全部为 0**；interactive=3。
+- FlxInvaders 回归：interactive=3，无 CHECK/FATAL。
+
+仍未实现（已在实验报告 §十 记录原因）：
+- 剪贴板：140 的 ui::Clipboard 读取改成了异步回调 + DataTransferEndpoint，
+  移植它需要重做 IPC 应答模型，不算"小件"。
+- 右键菜单 / DRM / 打印：依赖 blink 上下文菜单、设备 ID、PDF 组件，均非小改。
+- 光标（PPBInstance_SetCursor）：该消息在 138/140 都没有任何宿主，
+  需要先补 InstanceMessageFilter 的注册机制。
+---
+ content/browser/BUILD.gn                      |  2 +
+ .../content_browser_pepper_host_factory.cc    |  7 ++
+ .../pepper/pepper_flash_browser_host.cc       | 69 ++++++++++++++
+ .../pepper/pepper_flash_browser_host.h        | 53 +++++++++++
+ content/renderer/BUILD.gn                     |  2 +
+ .../content_renderer_pepper_host_factory.cc   | 13 +++
+ .../pepper/pepper_flash_font_file_host.cc     | 91 +++++++++++++++++++
+ .../pepper/pepper_flash_font_file_host.h      | 58 ++++++++++++
+ 8 files changed, 295 insertions(+)
+ create mode 100644 content/browser/renderer_host/pepper/pepper_flash_browser_host.cc
+ create mode 100644 content/browser/renderer_host/pepper/pepper_flash_browser_host.h
+ create mode 100644 content/renderer/pepper/pepper_flash_font_file_host.cc
+ create mode 100644 content/renderer/pepper/pepper_flash_font_file_host.h
+
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index d742a80d3f488..c8fad7c549ff5 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -3703,6 +3703,8 @@ source_set("browser") {
+         "renderer_host/pepper/pepper_file_ref_host.h",
+         "renderer_host/pepper/pepper_file_system_browser_host.cc",
+         "renderer_host/pepper/pepper_file_system_browser_host.h",
++        "renderer_host/pepper/pepper_flash_browser_host.cc",
++        "renderer_host/pepper/pepper_flash_browser_host.h",
+         "renderer_host/pepper/pepper_flash_file_message_filter.cc",
+         "renderer_host/pepper/pepper_flash_file_message_filter.h",
+         "renderer_host/pepper/pepper_gamepad_host.cc",
+diff --git a/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc b/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc
+index 174de87c61ff0..b02f981d97642 100644
+--- a/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc
++++ b/content/browser/renderer_host/pepper/content_browser_pepper_host_factory.cc
+@@ -12,6 +12,7 @@
+ #include "content/browser/renderer_host/pepper/pepper_file_io_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_file_ref_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_file_system_browser_host.h"
++#include "content/browser/renderer_host/pepper/pepper_flash_browser_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_flash_file_message_filter.h"
+ #include "content/browser/renderer_host/pepper/pepper_gamepad_host.h"
+ #include "content/browser/renderer_host/pepper/pepper_host_resolver_message_filter.h"
+@@ -212,6 +213,12 @@ ContentBrowserPepperHostFactory::CreateResourceHost(
+   // PPAPI revival: Flash-private file API (PPB_Flash_File / FileModuleLocal).
+   // Flash needs it for its writable data root (LSO / SharedObject, temporary
+   // files, FileReference). Flash is always allowed to use it in this build.
++  // PPAPI revival: Flash-private PPB_Flash singleton messages addressed to the
++  // browser (UpdateActivity / GetLocalTimeZoneOffset / GetLocalDataRestrictions).
++  if (message.type() == PpapiHostMsg_Flash_Create::ID) {
++    return std::unique_ptr<ppapi::host::ResourceHost>(
++        new PepperFlashBrowserHost(host_, instance, resource));
++  }
+   if (message.type() == PpapiHostMsg_FlashFile_Create::ID) {
+     scoped_refptr<ppapi::host::ResourceMessageFilter> flash_file_filter(
+         base::MakeRefCounted<PepperFlashFileMessageFilter>(instance, host_));
+diff --git a/content/browser/renderer_host/pepper/pepper_flash_browser_host.cc b/content/browser/renderer_host/pepper/pepper_flash_browser_host.cc
+new file mode 100644
+index 0000000000000..9e3f9b086f995
+--- /dev/null
++++ b/content/browser/renderer_host/pepper/pepper_flash_browser_host.cc
+@@ -0,0 +1,69 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/renderer_host/pepper/pepper_flash_browser_host.h"
++
++#include "content/public/browser/browser_ppapi_host.h"
++#include "ppapi/c/pp_errors.h"
++#include "ppapi/host/dispatch_host_message.h"
++#include "ppapi/host/host_message_context.h"
++#include "ppapi/host/ppapi_host.h"
++#include "ppapi/proxy/ppapi_messages.h"
++#include "ppapi/shared_impl/time_conversion.h"
++
++namespace content {
++
++PepperFlashBrowserHost::PepperFlashBrowserHost(BrowserPpapiHost* host,
++                                               PP_Instance instance,
++                                               PP_Resource resource)
++    : ResourceHost(host->GetPpapiHost(), instance, resource), host_(host) {
++  int unused = 0;
++  host->GetRenderFrameIDsForInstance(instance, &render_process_id_, &unused);
++}
++
++PepperFlashBrowserHost::~PepperFlashBrowserHost() = default;
++
++int32_t PepperFlashBrowserHost::OnResourceMessageReceived(
++    const IPC::Message& msg,
++    ppapi::host::HostMessageContext* context) {
++  PPAPI_BEGIN_MESSAGE_MAP(PepperFlashBrowserHost, msg)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL_0(PpapiHostMsg_Flash_UpdateActivity,
++                                        OnUpdateActivity)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_Flash_GetLocalTimeZoneOffset,
++                                      OnGetLocalTimeZoneOffset)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL_0(
++        PpapiHostMsg_Flash_GetLocalDataRestrictions, OnGetLocalDataRestrictions)
++  PPAPI_END_MESSAGE_MAP()
++  return PP_ERROR_FAILED;
++}
++
++int32_t PepperFlashBrowserHost::OnUpdateActivity(
++    ppapi::host::HostMessageContext* host_context) {
++  // M80 requested a power-save wake lock here. Content has no wake lock
++  // implementation, so this is a no-op; not sleeping is only a battery
++  // concern, not a correctness one.
++  return PP_OK;
++}
++
++int32_t PepperFlashBrowserHost::OnGetLocalTimeZoneOffset(
++    ppapi::host::HostMessageContext* host_context,
++    const base::Time& t) {
++  host_context->reply_msg =
++      PpapiPluginMsg_Flash_GetLocalTimeZoneOffsetReply(
++          ppapi::PPGetLocalTimeZoneOffset(t));
++  return PP_OK;
++}
++
++int32_t PepperFlashBrowserHost::OnGetLocalDataRestrictions(
++    ppapi::host::HostMessageContext* context) {
++  // Chrome derived these restrictions from the profile's CookieSettings, which
++  // content does not have. Report "no restrictions" so Flash treats its local
++  // storage as always allowed (this is what happens for a first-party plugin).
++  context->reply_msg =
++      PpapiPluginMsg_Flash_GetLocalDataRestrictionsReply(
++          static_cast<int32_t>(PP_FLASHLSORESTRICTIONS_NONE));
++  return PP_OK;
++}
++
++}  // namespace content
+diff --git a/content/browser/renderer_host/pepper/pepper_flash_browser_host.h b/content/browser/renderer_host/pepper/pepper_flash_browser_host.h
+new file mode 100644
+index 0000000000000..734cf3536ee43
+--- /dev/null
++++ b/content/browser/renderer_host/pepper/pepper_flash_browser_host.h
+@@ -0,0 +1,53 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// PPAPI revival: browser-side host for the Flash-private PPB_Flash messages
++// that are addressed to the browser process (UpdateActivity,
++// GetLocalTimeZoneOffset, GetLocalDataRestrictions). Ported in spirit from
++// Chromium M80 (chrome/browser/renderer_host/pepper/pepper_flash_browser_host),
++// reduced to what content can implement: no wake lock, and LSO restrictions are
++// always reported as unrestricted (content has no CookieSettings/profile).
++
++#ifndef CONTENT_BROWSER_RENDERER_HOST_PEPPER_PEPPER_FLASH_BROWSER_HOST_H_
++#define CONTENT_BROWSER_RENDERER_HOST_PEPPER_PEPPER_FLASH_BROWSER_HOST_H_
++
++#include <stdint.h>
++
++#include "base/memory/raw_ptr.h"
++#include "base/time/time.h"
++#include "ppapi/host/resource_host.h"
++
++namespace content {
++
++class BrowserPpapiHost;
++
++class PepperFlashBrowserHost : public ppapi::host::ResourceHost {
++ public:
++  PepperFlashBrowserHost(BrowserPpapiHost* host,
++                         PP_Instance instance,
++                         PP_Resource resource);
++  ~PepperFlashBrowserHost() override;
++
++  // ppapi::host::ResourceHost overrides.
++  int32_t OnResourceMessageReceived(
++      const IPC::Message& msg,
++      ppapi::host::HostMessageContext* context) override;
++
++ private:
++  int32_t OnUpdateActivity(ppapi::host::HostMessageContext* host_context);
++  int32_t OnGetLocalTimeZoneOffset(ppapi::host::HostMessageContext* host_context,
++                                   const base::Time& t);
++  int32_t OnGetLocalDataRestrictions(
++      ppapi::host::HostMessageContext* context);
++
++  raw_ptr<BrowserPpapiHost> host_;
++  int render_process_id_ = -1;
++
++  PepperFlashBrowserHost(const PepperFlashBrowserHost&) = delete;
++  PepperFlashBrowserHost& operator=(const PepperFlashBrowserHost&) = delete;
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_RENDERER_HOST_PEPPER_PEPPER_FLASH_BROWSER_HOST_H_
+diff --git a/content/renderer/BUILD.gn b/content/renderer/BUILD.gn
+index 9cc4f823f20cd..d18ba7ea35227 100644
+--- a/content/renderer/BUILD.gn
++++ b/content/renderer/BUILD.gn
+@@ -473,6 +473,8 @@ target(link_target_type, "renderer") {
+         "pepper/pepper_file_ref_renderer_host.h",
+         "pepper/pepper_file_system_host.cc",
+         "pepper/pepper_file_system_host.h",
++        "pepper/pepper_flash_font_file_host.cc",
++        "pepper/pepper_flash_font_file_host.h",
+         "pepper/pepper_flash_fullscreen_host.cc",
+         "pepper/pepper_flash_fullscreen_host.h",
+         "pepper/pepper_flash_renderer_host.cc",
+diff --git a/content/renderer/pepper/content_renderer_pepper_host_factory.cc b/content/renderer/pepper/content_renderer_pepper_host_factory.cc
+index a335454c381a8..fe20f0ed92147 100644
+--- a/content/renderer/pepper/content_renderer_pepper_host_factory.cc
++++ b/content/renderer/pepper/content_renderer_pepper_host_factory.cc
+@@ -21,6 +21,7 @@
+ #include "content/renderer/pepper/pepper_file_chooser_host.h"
+ #include "content/renderer/pepper/pepper_file_ref_renderer_host.h"
+ #include "content/renderer/pepper/pepper_file_system_host.h"
++#include "content/renderer/pepper/pepper_flash_font_file_host.h"
+ #include "content/renderer/pepper/pepper_flash_fullscreen_host.h"
+ #include "content/renderer/pepper/pepper_flash_renderer_host.h"
+ #include "content/renderer/pepper/pepper_graphics_2d_host.h"
+@@ -184,6 +185,18 @@ ContentRendererPepperHostFactory::CreateResourceHost(
+         new PepperFlashFullscreenHost(host_, instance, resource));
+   }
+ 
++  // PPAPI revival: Flash-private font file API (PPB_Flash_FontFile).
++  if (message.type() == PpapiHostMsg_FlashFontFile_Create::ID) {
++    ppapi::proxy::SerializedFontDescription description;
++    PP_PrivateFontCharset charset = PP_PRIVATEFONTCHARSET_ANSI;
++    if (!ppapi::UnpackMessage<PpapiHostMsg_FlashFontFile_Create>(
++            message, &description, &charset)) {
++      return nullptr;
++    }
++    return std::unique_ptr<ppapi::host::ResourceHost>(
++        new PepperFlashFontFileHost(host_, instance, resource, description,
++                                    charset));
++  }
+   // PPAPI revival: Flash-private PPB_Flash singleton (proxy lookup, navigate,
+   // always-on-top, hit testing, printing).
+   if (message.type() == PpapiHostMsg_Flash_Create::ID) {
+diff --git a/content/renderer/pepper/pepper_flash_font_file_host.cc b/content/renderer/pepper/pepper_flash_font_file_host.cc
+new file mode 100644
+index 0000000000000..45aad2703f842
+--- /dev/null
++++ b/content/renderer/pepper/pepper_flash_font_file_host.cc
+@@ -0,0 +1,91 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/renderer/pepper/pepper_flash_font_file_host.h"
++
++#include "base/sys_byteorder.h"
++#include "content/public/renderer/renderer_ppapi_host.h"
++#include "ppapi/c/pp_errors.h"
++#include "ppapi/host/dispatch_host_message.h"
++#include "ppapi/host/host_message_context.h"
++#include "ppapi/host/ppapi_host.h"
++#include "ppapi/proxy/ppapi_messages.h"
++#include "ppapi/proxy/serialized_structs.h"
++#include "skia/ext/font_utils.h"
++#include "third_party/skia/include/core/SkFontMgr.h"
++#include "third_party/skia/include/core/SkFontStyle.h"
++#include "third_party/skia/include/core/SkTypeface.h"
++
++PepperFlashFontFileHost::PepperFlashFontFileHost(
++    content::RendererPpapiHost* host,
++    PP_Instance instance,
++    PP_Resource resource,
++    const ppapi::proxy::SerializedFontDescription& description,
++    PP_PrivateFontCharset charset)
++    : ResourceHost(host->GetPpapiHost(), instance, resource) {
++  int weight = description.weight;
++  if (weight == FW_DONTCARE)
++    weight = SkFontStyle::kNormal_Weight;
++  SkFontStyle style(weight, SkFontStyle::kNormal_Width,
++                    description.italic ? SkFontStyle::kItalic_Slant
++                                       : SkFontStyle::kUpright_Slant);
++  sk_sp<SkFontMgr> font_mgr = skia::DefaultFontMgr();
++  if (font_mgr) {
++    typeface_ = font_mgr->matchFamilyStyle(description.face.c_str(), style);
++  }
++  if (!typeface_) {
++    LOG(ERROR) << "[flash-font] could not match font family '"
++               << description.face << "'";
++  }
++}
++
++PepperFlashFontFileHost::~PepperFlashFontFileHost() = default;
++
++int32_t PepperFlashFontFileHost::OnResourceMessageReceived(
++    const IPC::Message& msg,
++    ppapi::host::HostMessageContext* context) {
++  PPAPI_BEGIN_MESSAGE_MAP(PepperFlashFontFileHost, msg)
++    PPAPI_DISPATCH_HOST_RESOURCE_CALL(PpapiHostMsg_FlashFontFile_GetFontTable,
++                                      OnGetFontTable)
++  PPAPI_END_MESSAGE_MAP()
++  return PP_ERROR_FAILED;
++}
++
++bool PepperFlashFontFileHost::GetFontData(uint32_t table,
++                                          void* buffer,
++                                          size_t* length) {
++  if (!typeface_)
++    return false;
++
++  // Flash passes the OpenType table tag in big-endian byte order.
++  SkFontTableTag tag = base::ByteSwap(table);
++  if (buffer == nullptr) {
++    *length = typeface_->getTableSize(tag);
++    return *length > 0;
++  }
++  size_t new_length = typeface_->getTableData(tag, 0, *length, buffer);
++  return new_length == *length;
++}
++
++int32_t PepperFlashFontFileHost::OnGetFontTable(
++    ppapi::host::HostMessageContext* context,
++    uint32_t table) {
++  std::string contents;
++  int32_t result = PP_ERROR_FAILED;
++  size_t length = 0;
++  if (GetFontData(table, nullptr, &length)) {
++    contents.resize(length);
++    // getTableData() writes into the string's storage; const_cast is safe
++    // because the string is resized to the exact length first.
++    uint8_t* contents_ptr =
++        reinterpret_cast<uint8_t*>(const_cast<char*>(contents.data()));
++    if (GetFontData(table, contents_ptr, &length)) {
++      result = PP_OK;
++    } else {
++      contents.clear();
++    }
++  }
++  context->reply_msg = PpapiPluginMsg_FlashFontFile_GetFontTableReply(contents);
++  return result;
++}
+diff --git a/content/renderer/pepper/pepper_flash_font_file_host.h b/content/renderer/pepper/pepper_flash_font_file_host.h
+new file mode 100644
+index 0000000000000..e059df33f4a62
+--- /dev/null
++++ b/content/renderer/pepper/pepper_flash_font_file_host.h
+@@ -0,0 +1,58 @@
++// Copyright (c) 2012 The Chromium Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++//
++// PPAPI revival: renderer-side host for the Flash-private font-file API
++// (PPB_Flash_FontFile). Ported from Chromium M80
++// (chrome/renderer/pepper/pepper_flash_font_file_host.cc), Windows path only.
++
++#ifndef CONTENT_RENDERER_PEPPER_PEPPER_FLASH_FONT_FILE_HOST_H_
++#define CONTENT_RENDERER_PEPPER_PEPPER_FLASH_FONT_FILE_HOST_H_
++
++#include <stddef.h>
++#include <stdint.h>
++
++#include "base/memory/raw_ptr.h"
++#include "ppapi/c/private/ppb_flash_font_file.h"
++#include "ppapi/host/resource_host.h"
++#include "third_party/skia/include/core/SkRefCnt.h"
++
++class SkTypeface;
++
++namespace ppapi {
++namespace proxy {
++struct SerializedFontDescription;
++}
++}  // namespace ppapi
++
++namespace content {
++class RendererPpapiHost;
++}
++
++class PepperFlashFontFileHost : public ppapi::host::ResourceHost {
++ public:
++  PepperFlashFontFileHost(
++      content::RendererPpapiHost* host,
++      PP_Instance instance,
++      PP_Resource resource,
++      const ppapi::proxy::SerializedFontDescription& description,
++      PP_PrivateFontCharset charset);
++  ~PepperFlashFontFileHost() override;
++
++  // ppapi::host::ResourceHost override.
++  int32_t OnResourceMessageReceived(
++      const IPC::Message& msg,
++      ppapi::host::HostMessageContext* context) override;
++
++ private:
++  bool GetFontData(uint32_t table, void* buffer, size_t* length);
++  int32_t OnGetFontTable(ppapi::host::HostMessageContext* context,
++                         uint32_t table);
++
++  sk_sp<SkTypeface> typeface_;
++
++  PepperFlashFontFileHost(const PepperFlashFontFileHost&) = delete;
++  PepperFlashFontFileHost& operator=(const PepperFlashFontFileHost&) = delete;
++};
++
++#endif  // CONTENT_RENDERER_PEPPER_PEPPER_FLASH_FONT_FILE_HOST_H_
+-- 
+2.55.0.windows.2
+
+
+From 9360a4985ce092806c372893802cf08384d7224e Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 13:33:47 +0800
+Subject: [PATCH 07/11] =?UTF-8?q?feat(gpu):=20=E6=81=A2=E5=A4=8D=20SetDefa?=
+ =?UTF-8?q?ultFramebufferSharedImage=20=E5=85=A8=E9=93=BE=E8=B7=AF=20?=
+ =?UTF-8?q?=E2=80=94=E2=80=94=20PPB=5FGraphics3D=20=E7=A1=AC=E4=BB=B6?=
+ =?UTF-8?q?=E6=B8=B2=E6=9F=93=E5=8F=AF=E7=94=A8?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+背景：Chromium 在删除 PPAPI 时，把"把 SharedImage 绑成命令缓冲默认帧缓冲"的整条链路
+一起删了（mojom / 服务端 stub / 解码器 / 客户端代理 / GLES2ExternalFramebuffer 类）。
+PPB_Graphics3D 因此只能在 ColorBuffer::Attach 里空转，Flash Stage3D 只能退回软件驱动
+（driver=Software）。本次把这条链路按 138 的实现恢复。
+
+恢复内容（自底向上）：
+1. gpu/command_buffer/service/gles2_external_framebuffer.{h,cc}
+   —— 从 138 原样移植（96 + 633 行），140 编译零改动，说明相关 Skia/共享图像 API 未变。
+2. gpu/ipc/common/gpu_channel.mojom
+   —— 新增 SetDefaultFramebufferSharedImageParams 结构与
+   DeferredCommandBufferRequestParams 的 set_default_framebuffer_shared_image 分支。
+3. gpu/ipc/service/command_buffer_stub.{h,cc} + gles2_command_buffer_stub.{h,cc}
+   —— 新消息分发 + 虚函数 OnSetDefaultFramebufferSharedImage + 转发到解码器。
+4. gpu/command_buffer/service/gles2_cmd_decoder.h（新增纯虚）
+   + gles2_cmd_decoder.cc（validating 实现）
+   + gles2_cmd_decoder_passthrough.{h,cc}（passthrough 实现：附加后把 client 帧缓冲 0
+     重映射到 GLES2ExternalFramebuffer 的 FBO，并处理 separate FBO binding）
+   + gles2_cmd_decoder_mock.h（MOCK_METHOD5）。
+5. gpu/ipc/client/command_buffer_proxy_impl.{h,cc}
+   —— 客户端方法，走 EnqueueDeferredMessage + deferred 命令缓冲请求。
+6. content/renderer/pepper/ppb_graphics_3d_impl.cc
+   —— ColorBuffer::Attach/Detach 恢复真实调用（attach 共享图像 / 空 mailbox 解绑）。
+
+验证：
+- 全量构建通过（0 错误）。
+- 2D 回归：FlxInvaders / Canabalt 均 interactive=3、无 CHECK/FATAL、无崩溃。
+- Stage3D（wmode=direct）：上下文创建成功、清屏红色可见；但 Flash 仍报
+  driver=Software Hw_disabled=unavailable，日志里**没有任何 PPBGraphics3D_Create**
+  ——说明 Flash 在调用 PPAPI 之前就自判"硬件不可用"，本次恢复的链路尚未被 Flash 触发。
+  恢复本身是必要前提（否则即使 Flash 走硬件路径也画不出来），后续要找的是 Flash 侧的判定条件。
+---
+ .../renderer/pepper/ppb_graphics_3d_impl.cc   |  17 +-
+ gpu/command_buffer/service/BUILD.gn           |   2 +
+ .../service/gles2_cmd_decoder.cc              |  27 +
+ .../service/gles2_cmd_decoder.h               |   9 +
+ .../service/gles2_cmd_decoder_mock.h          |   6 +
+ .../service/gles2_cmd_decoder_passthrough.cc  |  53 ++
+ .../service/gles2_cmd_decoder_passthrough.h   |  11 +
+ .../service/gles2_external_framebuffer.cc     | 633 ++++++++++++++++++
+ .../service/gles2_external_framebuffer.h      |  96 +++
+ gpu/ipc/client/command_buffer_proxy_impl.cc   |  24 +
+ gpu/ipc/client/command_buffer_proxy_impl.h    |   8 +
+ gpu/ipc/common/gpu_channel.mojom              |  26 +
+ gpu/ipc/service/command_buffer_stub.cc        |   9 +
+ gpu/ipc/service/command_buffer_stub.h         |   8 +
+ gpu/ipc/service/gles2_command_buffer_stub.cc  |  12 +
+ gpu/ipc/service/gles2_command_buffer_stub.h   |   5 +
+ 16 files changed, 938 insertions(+), 8 deletions(-)
+ create mode 100644 gpu/command_buffer/service/gles2_external_framebuffer.cc
+ create mode 100644 gpu/command_buffer/service/gles2_external_framebuffer.h
+
+diff --git a/content/renderer/pepper/ppb_graphics_3d_impl.cc b/content/renderer/pepper/ppb_graphics_3d_impl.cc
+index cd51c5707b558..a9323cfccd222 100644
+--- a/content/renderer/pepper/ppb_graphics_3d_impl.cc
++++ b/content/renderer/pepper/ppb_graphics_3d_impl.cc
+@@ -115,20 +115,21 @@ class PPB_Graphics3D_Impl::ColorBuffer {
+               bool needs_depth,
+               bool needs_stencil) {
+     DCHECK_EQ(state, State::kDetached);
+-    // PPAPI revival: Chromium 140 removed the default-framebuffer shared image
+-    // API; PPB_Graphics3D compositing is degraded (Flash 2D is unaffected).
+-    (void)command_buffer;
+-    (void)samples_count;
+-    (void)preserve;
+-    (void)needs_depth;
+-    (void)needs_stencil;
++    // Chromium removed this API together with PPAPI. It is restored in gpu/
++    // (mojom + decoder + client) so PPB_Graphics3D — and therefore Flash
++    // Stage3D — renders into a compositor-visible SharedImage instead of
++    // drawing into a framebuffer nothing can see.
++    command_buffer->SetDefaultFramebufferSharedImage(
++        client_shared_image_->mailbox(), sync_token_, samples_count, preserve,
++        needs_depth, needs_stencil);
+     state = State::kAttached;
+     sync_token_.Clear();
+   }
+ 
+   void Detach(gpu::CommandBufferProxyImpl* command_buffer) {
+     DCHECK_EQ(state, State::kAttached);
+-    (void)command_buffer;
++    command_buffer->SetDefaultFramebufferSharedImage(
++        gpu::Mailbox(), gpu::SyncToken(), 0, false, false, false);
+     state = State::kDetached;
+   }
+ 
+diff --git a/gpu/command_buffer/service/BUILD.gn b/gpu/command_buffer/service/BUILD.gn
+index b1e985fae556e..5eac99c4f4551 100644
+--- a/gpu/command_buffer/service/BUILD.gn
++++ b/gpu/command_buffer/service/BUILD.gn
+@@ -158,6 +158,8 @@ target(link_target_type, "gles2_sources") {
+     "gles2_cmd_decoder.cc",
+     "gles2_cmd_decoder.h",
+     "gles2_cmd_decoder_autogen.h",
++    "gles2_external_framebuffer.cc",
++    "gles2_external_framebuffer.h",
+     "gles2_cmd_decoder_passthrough.cc",
+     "gles2_cmd_decoder_passthrough.h",
+     "gles2_cmd_decoder_passthrough_doer_prototypes.h",
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder.cc b/gpu/command_buffer/service/gles2_cmd_decoder.cc
+index f26cb5da0f02a..e8becf0aace70 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder.cc
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include "gpu/command_buffer/service/gles2_cmd_decoder.h"
++#include "gpu/command_buffer/service/gles2_external_framebuffer.h"
+ 
+ #include <limits.h>
+ #include <stddef.h>
+@@ -572,6 +573,11 @@ class GLES2DecoderImpl : public GLES2Decoder,
+   void Destroy(bool have_context) override;
+   void SetSurface(const scoped_refptr<gl::GLSurface>& surface) override;
+   void ReleaseSurface() override;
++  void SetDefaultFramebufferSharedImage(const Mailbox& mailbox,
++                                        int samples,
++                                        bool preserve,
++                                        bool needs_depth,
++                                        bool needs_stencil) override;
+   bool ResizeOffscreenFramebuffer(const gfx::Size& size);
+   bool MakeCurrent() override;
+   gl::GLApi* api() const { return state_.api(); }
+@@ -2388,6 +2394,9 @@ class GLES2DecoderImpl : public GLES2Decoder,
+   std::unique_ptr<BackFramebuffer> offscreen_target_frame_buffer_;
+   std::unique_ptr<BackTexture> offscreen_target_color_texture_;
+ 
++  // PPAPI revival: SharedImage-backed default framebuffer (Flash Stage3D).
++  std::unique_ptr<GLES2ExternalFramebuffer> external_default_framebuffer_;
++
+   // The format of the texture or renderbuffer backing the offscreen
+   // framebuffer.
+   GLenum offscreen_target_color_format_;
+@@ -4596,6 +4605,24 @@ void GLES2DecoderImpl::ReleaseSurface() {
+   surface_ = nullptr;
+ }
+ 
++void GLES2DecoderImpl::SetDefaultFramebufferSharedImage(const Mailbox& mailbox,
++                                                       int samples,
++                                                       bool preserve,
++                                                       bool needs_depth,
++                                                       bool needs_stencil) {
++  if (!external_default_framebuffer_) {
++    external_default_framebuffer_ = std::make_unique<GLES2ExternalFramebuffer>(
++        /*passthrough=*/false, *group_->feature_info(),
++        group_->shared_image_representation_factory());
++  }
++  if (!external_default_framebuffer_->AttachSharedImage(
++          mailbox, samples, preserve, needs_depth, needs_stencil)) {
++    return;
++  }
++  RestoreCurrentFramebufferBindings();
++}
++
++
+ error::Error GLES2DecoderImpl::HandleCreateGpuFenceINTERNAL(
+     uint32_t immediate_data_size,
+     const volatile void* cmd_data) {
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder.h b/gpu/command_buffer/service/gles2_cmd_decoder.h
+index 66f37bc23d6c2..6cccb84bb4818 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder.h
++++ b/gpu/command_buffer/service/gles2_cmd_decoder.h
+@@ -39,6 +39,7 @@ class GLSurface;
+ namespace gpu {
+ 
+ class DecoderClient;
++struct Mailbox;
+ 
+ namespace gles2 {
+ 
+@@ -160,6 +161,14 @@ class GPU_GLES2_EXPORT GLES2Decoder : public CommonDecoder,
+   // Gets the GLES2 Util which holds info.
+   virtual GLES2Util* GetGLES2Util() = 0;
+ 
++  // PPAPI revival: attaches a SharedImage to this context's default framebuffer
++  // (used by PPB_Graphics3D for Flash Stage3D). An empty mailbox detaches.
++  virtual void SetDefaultFramebufferSharedImage(const Mailbox& mailbox,
++                                                int samples,
++                                                bool preserve,
++                                                bool needs_depth,
++                                                bool needs_stencil) = 0;
++
+   // Restore States.
+   virtual void RestoreDeviceWindowRectangles() const = 0;
+ 
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_mock.h b/gpu/command_buffer/service/gles2_cmd_decoder_mock.h
+index a9b5c6d8be021..5d3988ade4594 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_mock.h
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_mock.h
+@@ -58,6 +58,12 @@ class MockGLES2Decoder : public GLES2Decoder {
+   MOCK_METHOD0(MakeCurrent, bool());
+   MOCK_METHOD1(GetServiceIdForTesting, uint32_t(uint32_t client_id));
+   MOCK_METHOD0(GetGLES2Util, GLES2Util*());
++  MOCK_METHOD5(SetDefaultFramebufferSharedImage,
++               void(const Mailbox& mailbox,
++                    int samples,
++                    bool preserve,
++                    bool needs_depth,
++                    bool needs_stencil));
+   MOCK_METHOD0(GetGLSurface, gl::GLSurface*());
+   MOCK_METHOD0(GetGLContext, gl::GLContext*());
+   MOCK_METHOD0(GetContextGroup, ContextGroup*());
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+index ddd2eb9b3ba1a..6c63b653c976e 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+@@ -8,6 +8,7 @@
+ #endif
+ 
+ #include "gpu/command_buffer/service/gles2_cmd_decoder_passthrough.h"
++#include "gpu/command_buffer/service/gles2_external_framebuffer.h"
+ 
+ #include <algorithm>
+ #include <memory>
+@@ -1253,6 +1254,58 @@ void GLES2DecoderPassthroughImpl::ReleaseSurface() {
+   surface_ = nullptr;
+ }
+ 
++// PPAPI revival: attach a SharedImage (compositor-visible) as this context's
++// default framebuffer, so PPB_Graphics3D clients (Flash Stage3D) can render
++// into it. Ported from Chromium 138 (removed together with PPAPI).
++void GLES2DecoderPassthroughImpl::SetDefaultFramebufferSharedImage(
++    const Mailbox& mailbox,
++    int samples,
++    bool preserve,
++    bool needs_depth,
++    bool needs_stencil) {
++  if (!offscreen_)
++    return;
++
++  if (!external_default_framebuffer_) {
++    external_default_framebuffer_ = std::make_unique<GLES2ExternalFramebuffer>(
++        /*passthrough=*/true, *feature_info_,
++        group_->shared_image_representation_factory());
++  }
++
++  if (!external_default_framebuffer_->AttachSharedImage(
++          mailbox, samples, preserve, needs_depth, needs_stencil)) {
++    return;
++  }
++
++  GLuint default_framebuffer_id;
++  if (external_default_framebuffer_->IsSharedImageAttached()) {
++    default_framebuffer_id = external_default_framebuffer_->GetFramebufferId();
++  } else {
++    default_framebuffer_id = emulated_back_buffer_->framebuffer_service_id;
++  }
++
++  framebuffer_id_map_.RemoveClientID(0);
++  framebuffer_id_map_.SetIDMapping(0, default_framebuffer_id);
++
++  const bool supports_separate_fbo_bindings =
++      feature_info_->feature_flags().chromium_framebuffer_multisample ||
++      feature_info_->IsWebGL2OrES3Context();
++
++  if (supports_separate_fbo_bindings) {
++    if (bound_draw_framebuffer_ == 0) {
++      api()->glBindFramebufferEXTFn(GL_DRAW_FRAMEBUFFER, default_framebuffer_id);
++    }
++    if (bound_read_framebuffer_ == 0) {
++      api()->glBindFramebufferEXTFn(GL_READ_FRAMEBUFFER, default_framebuffer_id);
++    }
++  } else {
++    DCHECK_EQ(bound_draw_framebuffer_, bound_read_framebuffer_);
++    if (bound_draw_framebuffer_ == 0) {
++      api()->glBindFramebufferEXTFn(GL_FRAMEBUFFER, default_framebuffer_id);
++    }
++  }
++}
++
+ bool GLES2DecoderPassthroughImpl::MakeCurrent() {
+   if (!context_.get())
+     return false;
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.h b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.h
+index 8abda10a14849..e12088ddb9f30 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.h
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.h
+@@ -51,6 +51,7 @@ class ContextGroup;
+ class GPUTracer;
+ class MultiDrawManager;
+ class GLES2DecoderPassthroughImpl;
++class GLES2ExternalFramebuffer;
+ class PassthroughProgramCache;
+ 
+ struct MappedBuffer {
+@@ -188,6 +189,13 @@ class GPU_GLES2_EXPORT GLES2DecoderPassthroughImpl
+   // Gets the GLES2 Util which holds info.
+   GLES2Util* GetGLES2Util() override;
+ 
++  // PPAPI revival: attaches a SharedImage to the default framebuffer.
++  void SetDefaultFramebufferSharedImage(const Mailbox& mailbox,
++                                        int samples,
++                                        bool preserve,
++                                        bool needs_depth,
++                                        bool needs_stencil) override;
++
+   // Gets the associated GLContext and GLSurface.
+   gl::GLContext* GetGLContext() override;
+   gl::GLSurface* GetGLSurface() override;
+@@ -712,6 +720,9 @@ class GPU_GLES2_EXPORT GLES2DecoderPassthroughImpl
+   GLenum emulated_default_framebuffer_format_;
+   std::unique_ptr<EmulatedDefaultFramebuffer> emulated_back_buffer_;
+ 
++  // PPAPI revival: SharedImage-backed default framebuffer (Flash Stage3D).
++  std::unique_ptr<GLES2ExternalFramebuffer> external_default_framebuffer_;
++
+   // Maximum 2D resource sizes for limiting offscreen framebuffer sizes
+   GLint max_renderbuffer_size_ = 0;
+   GLint max_offscreen_framebuffer_size_ = 0;
+diff --git a/gpu/command_buffer/service/gles2_external_framebuffer.cc b/gpu/command_buffer/service/gles2_external_framebuffer.cc
+new file mode 100644
+index 0000000000000..85a7b8470bcb4
+--- /dev/null
++++ b/gpu/command_buffer/service/gles2_external_framebuffer.cc
+@@ -0,0 +1,633 @@
++// Copyright 2022 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++
++#include "gpu/command_buffer/service/gles2_external_framebuffer.h"
++
++#include "gpu/command_buffer/service/feature_info.h"
++#include "gpu/command_buffer/service/shared_image/shared_image_factory.h"
++#include "gpu/command_buffer/service/shared_image/shared_image_representation.h"
++#include "gpu/command_buffer/service/texture_base.h"
++#include "ui/gfx/geometry/size.h"
++#include "ui/gl/scoped_binders.h"
++#include "ui/gl/scoped_restore_texture.h"
++
++namespace gpu::gles2 {
++namespace {
++class ScopedRestoreRenderbuffer {
++ public:
++  explicit ScopedRestoreRenderbuffer(gl::GLApi* api) : api_(api) {
++    api_->glGetIntegervFn(GL_RENDERBUFFER_BINDING, &renderbuffer_);
++  }
++
++  ~ScopedRestoreRenderbuffer() {
++    api_->glBindRenderbufferEXTFn(GL_RENDERBUFFER, renderbuffer_);
++  }
++
++ private:
++  const raw_ptr<gl::GLApi> api_;
++  GLint renderbuffer_ = 0;
++};
++
++class ScopedRestoreWindowRectangles {
++ public:
++  explicit ScopedRestoreWindowRectangles(gl::GLApi* api) : api_(api) {
++    api_->glGetIntegervFn(GL_WINDOW_RECTANGLE_MODE_EXT, &mode_);
++
++    GLint num_windows = 0;
++    api_->glGetIntegervFn(GL_NUM_WINDOW_RECTANGLES_EXT, &num_windows);
++
++    windows_.resize(4 * num_windows);
++    for (int i = 0; i < num_windows; ++i) {
++      glGetIntegeri_v(GL_WINDOW_RECTANGLE_EXT, i, &windows_[i * 4]);
++    }
++  }
++
++  ~ScopedRestoreWindowRectangles() {
++    api_->glWindowRectanglesEXTFn(mode_, windows_.size() / 4, windows_.data());
++  }
++
++ private:
++  const raw_ptr<gl::GLApi> api_;
++  GLint mode_ = GL_EXCLUSIVE_EXT;
++  std::vector<GLint> windows_;
++};
++
++class ScopedRestoreWriteMasks {
++ public:
++  explicit ScopedRestoreWriteMasks(gl::GLApi* api) : api_(api) {
++    api_->glGetIntegervFn(GL_STENCIL_WRITEMASK, &stencil_front_mask_);
++    api_->glGetIntegervFn(GL_STENCIL_BACK_WRITEMASK, &stencil_back_mask_);
++    api_->glGetBooleanvFn(GL_DEPTH_WRITEMASK, &depth_mask_);
++    api_->glGetBooleanvFn(GL_COLOR_WRITEMASK, color_mask_);
++  }
++
++  ~ScopedRestoreWriteMasks() {
++    api_->glColorMaskFn(color_mask_[0], color_mask_[1], color_mask_[2],
++                        color_mask_[3]);
++    api_->glDepthMaskFn(depth_mask_);
++    api_->glStencilMaskSeparateFn(GL_FRONT, stencil_front_mask_);
++    api_->glStencilMaskSeparateFn(GL_BACK, stencil_back_mask_);
++  }
++
++ private:
++  const raw_ptr<gl::GLApi> api_;
++  GLboolean color_mask_[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
++  GLboolean depth_mask_ = GL_TRUE;
++  GLint stencil_front_mask_ = 0xFF;
++  GLint stencil_back_mask_ = 0xFF;
++};
++
++class ScopedRestoreClearValues {
++ public:
++  explicit ScopedRestoreClearValues(gl::GLApi* api) : api_(api) {
++    api_->glGetFloatvFn(GL_COLOR_CLEAR_VALUE, clear_color_);
++    api_->glGetFloatvFn(GL_DEPTH_CLEAR_VALUE, &clear_depth_);
++    api_->glGetIntegervFn(GL_STENCIL_CLEAR_VALUE, &clear_stencil_);
++  }
++  ~ScopedRestoreClearValues() {
++    api_->glClearColorFn(clear_color_[0], clear_color_[1], clear_color_[2],
++                         clear_color_[3]);
++    api_->glClearDepthFn(clear_depth_);
++    api_->glClearStencilFn(clear_stencil_);
++  }
++
++ private:
++  const raw_ptr<gl::GLApi> api_;
++  GLfloat clear_color_[4] = {};
++  GLfloat clear_depth_ = 0.0f;
++  GLint clear_stencil_ = 0;
++};
++
++class ScopedRestoreFramebuffer {
++ public:
++  ScopedRestoreFramebuffer(gl::GLApi* api, bool supports_separate_fbo_bindings)
++      : api_(api),
++        supports_separate_fbo_bindings_(supports_separate_fbo_bindings) {
++    if (supports_separate_fbo_bindings_) {
++      api_->glGetIntegervFn(GL_DRAW_FRAMEBUFFER_BINDING, &draw_framebuffer_);
++      api_->glGetIntegervFn(GL_READ_FRAMEBUFFER_BINDING, &read_framebuffer_);
++    } else {
++      api_->glGetIntegervFn(GL_FRAMEBUFFER_BINDING, &draw_framebuffer_);
++    }
++  }
++
++  ~ScopedRestoreFramebuffer() {
++    if (supports_separate_fbo_bindings_) {
++      api_->glBindFramebufferEXTFn(GL_DRAW_FRAMEBUFFER, draw_framebuffer_);
++      api_->glBindFramebufferEXTFn(GL_READ_FRAMEBUFFER, read_framebuffer_);
++    } else {
++      api_->glBindFramebufferEXTFn(GL_FRAMEBUFFER, draw_framebuffer_);
++    }
++  }
++
++ private:
++  const raw_ptr<gl::GLApi> api_;
++  const bool supports_separate_fbo_bindings_;
++  GLint draw_framebuffer_ = 0;
++  GLint read_framebuffer_ = 0;
++};
++}  // namespace
++
++class GLES2ExternalFramebuffer::Attachment {
++ public:
++  static std::unique_ptr<Attachment> CreateTexture(const gfx::Size& size,
++                                                   GLenum format) {
++    gl::GLApi* const api = gl::g_current_gl_context;
++    gl::ScopedRestoreTexture scoped_restore(api, GL_TEXTURE_2D);
++
++    // Don't use sized formats for textures
++    GLenum texture_format;
++    switch (format) {
++      case GL_RGBA8:
++        texture_format = GL_RGBA;
++        break;
++      case GL_RGB8:
++        texture_format = GL_RGB;
++        break;
++      default:
++        texture_format = GL_RGBA;
++        NOTREACHED();
++    }
++
++    GLuint texture;
++    api->glGenTexturesFn(1, &texture);
++    api->glBindTextureFn(GL_TEXTURE_2D, texture);
++    api->glTexImage2DFn(GL_TEXTURE_2D, 0, texture_format, size.width(),
++                        size.height(), 0, texture_format, GL_UNSIGNED_BYTE,
++                        nullptr);
++
++    return std::make_unique<Attachment>(size, /*samples_count=*/0, format,
++                                        /*texture=*/texture,
++                                        /*renderbuffer=*/0);
++  }
++
++  static std::unique_ptr<Attachment> CreateRenderbuffer(const gfx::Size& size,
++                                                        int samples_count,
++                                                        GLenum format) {
++    gl::GLApi* const api = gl::g_current_gl_context;
++    ScopedRestoreRenderbuffer rb_restore(api);
++
++    GLuint renderbuffer;
++    api->glGenRenderbuffersEXTFn(1, &renderbuffer);
++    api->glBindRenderbufferEXTFn(GL_RENDERBUFFER, renderbuffer);
++
++    if (samples_count > 0) {
++      api->glRenderbufferStorageMultisampleFn(
++          GL_RENDERBUFFER, samples_count, format, size.width(), size.height());
++    } else {
++      api->glRenderbufferStorageEXTFn(GL_RENDERBUFFER, format, size.width(),
++                                      size.height());
++    }
++
++    return std::make_unique<Attachment>(size, samples_count, format,
++                                        /*texture=*/0,
++                                        /*renderbuffer=*/renderbuffer);
++  }
++
++  Attachment(const gfx::Size& size,
++             int samples_count,
++             GLenum format,
++             GLuint texture,
++             GLuint renderbuffer)
++      : size_(size),
++        samples_count_(samples_count),
++        format_(format),
++        texture_(texture),
++        renderbuffer_(renderbuffer) {
++    DCHECK_NE(!!texture, !!renderbuffer);
++    DCHECK(!size.IsEmpty());
++    DCHECK(format);
++  }
++
++  Attachment(const Attachment&) = delete;
++  Attachment(Attachment&&) = delete;
++
++  Attachment& operator=(const Attachment&) = delete;
++  Attachment& operator=(Attachment&&) = delete;
++
++  ~Attachment() {
++    // No need to do anything if context was lost.
++    if (context_lost_)
++      return;
++
++    DCHECK_EQ(attach_point_, 0u);
++    if (texture_)
++      glDeleteTextures(1, &texture_);
++    else if (renderbuffer_)
++      glDeleteRenderbuffersEXT(1, &renderbuffer_);
++  }
++
++  void Attach(GLenum attachment) {
++    DCHECK_EQ(attach_point_, 0u);
++    attach_point_ = attachment;
++
++    if (texture_)
++      AttachImpl(attach_point_, /*is_texture=*/true, texture_);
++    else
++      AttachImpl(attach_point_, /*is_texture=*/false, renderbuffer_);
++  }
++
++  void Detach() {
++    DCHECK_NE(attach_point_, 0u);
++
++    if (texture_)
++      AttachImpl(attach_point_, /*is_texture=*/true, 0);
++    else
++      AttachImpl(attach_point_, /*is_texture=*/false, 0);
++    attach_point_ = 0;
++  }
++
++  bool NeedsResolve() { return samples_count_ > 0; }
++
++  bool Compatible(const gfx::Size size, int samples_count, GLenum format) {
++    return size_ == size && samples_count_ == samples_count &&
++           format_ == format;
++  }
++
++  void OnContextLost() { context_lost_ = true; }
++
++  GLenum format() const { return format_; }
++  int samples_count() const { return samples_count_; }
++
++ private:
++  void AttachImpl(GLenum attachment, bool is_texture, GLuint object) {
++    if (is_texture) {
++      glFramebufferTexture2DEXT(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                GL_TEXTURE_2D, object, 0);
++    } else {
++      if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
++        glFramebufferRenderbufferEXT(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
++                                     GL_RENDERBUFFER, object);
++        glFramebufferRenderbufferEXT(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
++                                     GL_RENDERBUFFER, object);
++      } else {
++        glFramebufferRenderbufferEXT(GL_FRAMEBUFFER, attachment,
++                                     GL_RENDERBUFFER, object);
++      }
++    }
++  }
++
++  GLenum attach_point_ = 0;
++  bool context_lost_ = false;
++
++  const gfx::Size size_;
++  const int samples_count_;
++  const GLenum format_;
++  const GLuint texture_;
++  const GLuint renderbuffer_;
++};
++
++GLES2ExternalFramebuffer::GLES2ExternalFramebuffer(
++    bool passthrough,
++    const FeatureInfo& feature_info,
++    SharedImageRepresentationFactory* shared_image_representation_factory)
++    : passthrough_(passthrough),
++      shared_image_representation_factory_(
++          shared_image_representation_factory) {
++  const bool multisampled_framebuffers_supported =
++      feature_info.feature_flags().chromium_framebuffer_multisample;
++  const bool rgb8_supported = feature_info.feature_flags().oes_rgb8_rgba8;
++  // The only available default render buffer formats in GLES2 have very
++  // little precision.  Don't enable multisampling unless 8-bit render
++  // buffer formats are available--instead fall back to 8-bit textures.
++
++  if (multisampled_framebuffers_supported && rgb8_supported) {
++    glGetIntegerv(GL_MAX_SAMPLES_EXT, &max_sample_count_);
++  }
++
++  packed_depth_stencil_ = feature_info.feature_flags().packed_depth24_stencil8;
++  supports_separate_fbo_bindings_ = multisampled_framebuffers_supported ||
++                                    feature_info.IsWebGL2OrES3Context();
++  supports_window_rectangles_ =
++      feature_info.feature_flags().ext_window_rectangles;
++
++  glGenFramebuffersEXT(1, &fbo_);
++}
++
++GLES2ExternalFramebuffer::~GLES2ExternalFramebuffer() {
++  DCHECK_EQ(fbo_, 0u);
++  DCHECK(attachments_.empty());
++}
++
++void GLES2ExternalFramebuffer::Destroy(bool have_context) {
++  if (!have_context) {
++    for (auto& attachment : attachments_)
++      attachment.second->OnContextLost();
++
++    if (shared_image_representation_)
++      shared_image_representation_->OnContextLost();
++  } else {
++    gl::GLApi* const api = gl::g_current_gl_context;
++    ScopedRestoreFramebuffer scoped_fbo_reset(api,
++                                              supports_separate_fbo_bindings_);
++    api->glBindFramebufferEXTFn(GL_FRAMEBUFFER, fbo_);
++    for (auto& attachment : attachments_)
++      attachment.second->Detach();
++  }
++
++  scoped_access_.reset();
++  shared_image_representation_.reset();
++
++  attachments_.clear();
++
++  if (have_context)
++    glDeleteFramebuffersEXT(1, &fbo_);
++  fbo_ = 0;
++}
++
++bool GLES2ExternalFramebuffer::AttachSharedImage(const Mailbox& mailbox,
++                                                 int samples,
++                                                 bool preserve,
++                                                 bool need_depth,
++                                                 bool need_stencil) {
++  ResolveAndDetach();
++
++  if (mailbox.IsZero())
++    return true;
++
++  if (passthrough_) {
++    shared_image_representation_ =
++        shared_image_representation_factory_->ProduceGLTexturePassthrough(
++            mailbox);
++  } else {
++    shared_image_representation_ =
++        shared_image_representation_factory_->ProduceGLTexture(mailbox);
++  }
++
++  if (!shared_image_representation_) {
++    LOG(ERROR) << "Can't produce representation";
++    return false;
++  }
++
++  if (!shared_image_representation_->format().is_single_plane() ||
++      (shared_image_representation_->format() !=
++           viz::SinglePlaneFormat::kRGBA_8888 &&
++       shared_image_representation_->format() !=
++           viz::SinglePlaneFormat::kRGBX_8888)) {
++    LOG(ERROR) << "Unsupported format";
++    return false;
++  }
++
++  scoped_access_ = shared_image_representation_->BeginScopedAccess(
++      GL_SHARED_IMAGE_ACCESS_MODE_READWRITE_CHROMIUM,
++      GLTextureImageRepresentationBase::AllowUnclearedAccess::kYes);
++
++  if (!scoped_access_) {
++    LOG(ERROR) << "Can't BeginAccess";
++    return false;
++  }
++
++  samples = std::min(samples, max_sample_count_);
++  const bool can_attach_directly = !samples && !preserve;
++
++  GLenum clear_flags = 0;
++  const auto& size = shared_image_representation_->size();
++
++  gl::GLApi* const api = gl::g_current_gl_context;
++  ScopedRestoreFramebuffer scoped_fbo_reset(api,
++                                            supports_separate_fbo_bindings_);
++  api->glBindFramebufferEXTFn(GL_FRAMEBUFFER, fbo_);
++
++  if (can_attach_directly) {
++    glFramebufferTexture2DEXT(
++        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
++        shared_image_representation_->GetTextureBase()->service_id(), 0);
++    if (!shared_image_representation_->IsCleared())
++      clear_flags |= GL_COLOR_BUFFER_BIT;
++  } else {
++    const bool has_alpha = shared_image_representation_->format() ==
++                           viz::SinglePlaneFormat::kRGBA_8888;
++    if (UpdateAttachment(GL_COLOR_ATTACHMENT0, size, samples,
++                         has_alpha ? GL_RGBA8 : GL_RGB8)) {
++      clear_flags |= GL_COLOR_BUFFER_BIT;
++    }
++  }
++
++  // If GL_DEPTH24_STENCIL8 is supported, we prefer it.
++  if (packed_depth_stencil_) {
++    if (UpdateAttachment(
++            GL_DEPTH_STENCIL_ATTACHMENT, size, samples,
++            (need_depth || need_stencil) ? GL_DEPTH24_STENCIL8 : GL_NONE)) {
++      clear_flags |= GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
++    }
++  } else {
++    if (UpdateAttachment(GL_DEPTH_ATTACHMENT, size, samples,
++                         need_depth ? GL_DEPTH_COMPONENT16 : GL_NONE)) {
++      clear_flags |= GL_DEPTH_BUFFER_BIT;
++    }
++    if (UpdateAttachment(GL_STENCIL_ATTACHMENT, size, samples,
++                         need_stencil ? GL_STENCIL_INDEX8 : GL_NONE)) {
++      clear_flags |= GL_STENCIL_BUFFER_BIT;
++    }
++  }
++
++  GLenum status = api->glCheckFramebufferStatusEXTFn(GL_FRAMEBUFFER);
++  LOG_IF(DFATAL, status != GL_FRAMEBUFFER_COMPLETE)
++      << "Framebuffer incomplete: " << status;
++
++  if (clear_flags) {
++    gl::ScopedCapability scoped_scissor(GL_SCISSOR_TEST, GL_FALSE);
++
++    std::optional<ScopedRestoreWindowRectangles> window_rectangles_restore;
++    if (supports_window_rectangles_) {
++      window_rectangles_restore.emplace(api);
++      api->glWindowRectanglesEXTFn(GL_EXCLUSIVE_EXT, 0, nullptr);
++    }
++
++    ScopedRestoreWriteMasks write_mask_restore(api);
++    api->glColorMaskFn(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++    api->glDepthMaskFn(GL_TRUE);
++    api->glStencilMaskSeparateFn(GL_FRONT, 0xFF);
++    api->glStencilMaskSeparateFn(GL_BACK, 0xFF);
++
++    ScopedRestoreClearValues clear_values_restore(api);
++    api->glClearColorFn(0, 0, 0, 0);
++    api->glClearDepthFn(0.0f);
++    api->glClearStencilFn(0);
++
++    api->glClearFn(clear_flags);
++
++    // If we attached SharedImage directly and did clear color attachment, mark
++    // it as cleared.
++    if (attachments_.find(GL_COLOR_ATTACHMENT0) == attachments_.end() &&
++        (clear_flags & GL_COLOR_BUFFER_BIT))
++      shared_image_representation_->SetCleared();
++  }
++
++  return true;
++}
++
++bool GLES2ExternalFramebuffer::UpdateAttachment(GLenum attachment,
++                                                const gfx::Size& size,
++                                                int samples,
++                                                GLenum format) {
++  if (auto old_attachment = attachments_.find(attachment);
++      old_attachment != attachments_.end()) {
++    if (old_attachment->second->Compatible(size, samples, format))
++      return false;
++    old_attachment->second->Detach();
++    attachments_.erase(attachment);
++  }
++
++  if (format) {
++    attachments_[attachment] =
++        CreateAttachment(attachment, size, samples, format);
++    attachments_[attachment]->Attach(attachment);
++    return true;
++  }
++  return false;
++}
++
++std::unique_ptr<GLES2ExternalFramebuffer::Attachment>
++GLES2ExternalFramebuffer::CreateAttachment(GLenum attachment,
++                                           const gfx::Size& size,
++                                           int samples,
++                                           GLenum format) {
++  if (attachment == GL_COLOR_ATTACHMENT0 && samples == 0) {
++    return Attachment::CreateTexture(size, format);
++  }
++
++  return Attachment::CreateRenderbuffer(size, samples, format);
++}
++
++void GLES2ExternalFramebuffer::ResolveAndDetach() {
++  if (!scoped_access_) {
++    DCHECK(!shared_image_representation_);
++    return;
++  }
++
++  gl::GLApi* const api = gl::g_current_gl_context;
++  ScopedRestoreFramebuffer scoped_fbo_reset(api,
++                                            supports_separate_fbo_bindings_);
++
++  if (auto color_attachment = attachments_.find(GL_COLOR_ATTACHMENT0);
++      color_attachment != attachments_.end()) {
++    const auto& size = shared_image_representation_->size();
++
++    // If we have separate attachment, we need to blit/resolve it to shared
++    // image.
++    if (color_attachment->second->NeedsResolve()) {
++      DCHECK(supports_separate_fbo_bindings_);
++
++      gl::ScopedCapability scoped_scissor(GL_SCISSOR_TEST, GL_FALSE);
++      ScopedRestoreWriteMasks write_mask_restore(api);
++      api->glColorMaskFn(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++
++      std::optional<ScopedRestoreWindowRectangles> window_rectangles_restore;
++      if (supports_window_rectangles_) {
++        window_rectangles_restore.emplace(api);
++        api->glWindowRectanglesEXTFn(GL_EXCLUSIVE_EXT, 0, nullptr);
++      }
++
++      api->glBindFramebufferEXTFn(GL_READ_FRAMEBUFFER, fbo_);
++
++      GLuint temp_fbo;
++      api->glGenFramebuffersEXTFn(1, &temp_fbo);
++      api->glBindFramebufferEXTFn(GL_DRAW_FRAMEBUFFER, temp_fbo);
++      api->glFramebufferTexture2DEXTFn(
++          GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
++          shared_image_representation_->GetTextureBase()->service_id(), 0);
++
++      api->glBlitFramebufferFn(0, 0, size.width(), size.height(), 0, 0,
++                               size.width(), size.height(), GL_COLOR_BUFFER_BIT,
++                               GL_NEAREST);
++
++      api->glDeleteFramebuffersEXTFn(1, &temp_fbo);
++    } else {
++      api->glBindFramebufferEXTFn(GL_FRAMEBUFFER, fbo_);
++      gl::ScopedRestoreTexture texture(api, GL_TEXTURE_2D);
++      api->glBindTextureFn(
++          GL_TEXTURE_2D,
++          shared_image_representation_->GetTextureBase()->service_id());
++
++      api->glCopyTexSubImage2DFn(GL_TEXTURE_2D, 0, 0, 0, 0, 0, size.width(),
++                                 size.height());
++    }
++    // We did resolved to SharedImage, so we can mark it as cleared here.
++    shared_image_representation_->SetCleared();
++  } else {
++    // Detach color attachment if we were attached directly.
++    api->glBindFramebufferEXTFn(GL_FRAMEBUFFER, fbo_);
++    api->glFramebufferTexture2DEXTFn(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                     GL_TEXTURE_2D, 0, 0);
++  }
++  scoped_access_.reset();
++  shared_image_representation_.reset();
++}
++
++GLuint GLES2ExternalFramebuffer::GetFramebufferId() const {
++  return fbo_;
++}
++
++bool GLES2ExternalFramebuffer::IsSharedImageAttached() const {
++  return !!scoped_access_;
++}
++
++gfx::Size GLES2ExternalFramebuffer::GetSize() const {
++  DCHECK(IsSharedImageAttached());
++  return shared_image_representation_->size();
++}
++
++GLenum GLES2ExternalFramebuffer::GetColorFormat() const {
++  DCHECK(IsSharedImageAttached());
++  auto it = attachments_.find(GL_COLOR_ATTACHMENT0);
++  CHECK(it != attachments_.end());
++  return it->second->format();
++}
++
++GLenum GLES2ExternalFramebuffer::GetDepthFormat() const {
++  DCHECK(IsSharedImageAttached());
++  if (auto it = attachments_.find(GL_DEPTH_STENCIL_ATTACHMENT);
++      it != attachments_.end()) {
++    return it->second->format();
++  }
++
++  if (auto it = attachments_.find(GL_DEPTH_ATTACHMENT);
++      it != attachments_.end()) {
++    return it->second->format();
++  }
++
++  return GL_NONE;
++}
++
++GLenum GLES2ExternalFramebuffer::GetStencilFormat() const {
++  DCHECK(IsSharedImageAttached());
++  DCHECK(IsSharedImageAttached());
++  if (auto it = attachments_.find(GL_DEPTH_STENCIL_ATTACHMENT);
++      it != attachments_.end()) {
++    return it->second->format();
++  }
++
++  if (auto it = attachments_.find(GL_STENCIL_ATTACHMENT);
++      it != attachments_.end()) {
++    return it->second->format();
++  }
++
++  return GL_NONE;
++}
++
++int GLES2ExternalFramebuffer::GetSamplesCount() const {
++  DCHECK(IsSharedImageAttached());
++  auto it = attachments_.find(GL_COLOR_ATTACHMENT0);
++  CHECK(it != attachments_.end());
++  return it->second->samples_count();
++}
++
++bool GLES2ExternalFramebuffer::HasAlpha() const {
++  DCHECK(IsSharedImageAttached());
++  auto it = attachments_.find(GL_COLOR_ATTACHMENT0);
++  CHECK(it != attachments_.end());
++  return it->second->format() == GL_RGBA8;
++}
++
++bool GLES2ExternalFramebuffer::HasDepth() const {
++  return GetDepthFormat() != GL_NONE;
++}
++
++bool GLES2ExternalFramebuffer::HasStencil() const {
++  return GetStencilFormat() != GL_NONE;
++}
++
++}  // namespace gpu::gles2
+diff --git a/gpu/command_buffer/service/gles2_external_framebuffer.h b/gpu/command_buffer/service/gles2_external_framebuffer.h
+new file mode 100644
+index 0000000000000..b456c96be5dc6
+--- /dev/null
++++ b/gpu/command_buffer/service/gles2_external_framebuffer.h
+@@ -0,0 +1,96 @@
++// Copyright 2022 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef GPU_COMMAND_BUFFER_SERVICE_GLES2_EXTERNAL_FRAMEBUFFER_H_
++#define GPU_COMMAND_BUFFER_SERVICE_GLES2_EXTERNAL_FRAMEBUFFER_H_
++
++#include <memory>
++
++#include "base/containers/flat_map.h"
++#include "gpu/command_buffer/common/mailbox.h"
++#include "gpu/command_buffer/service/shared_image/shared_image_representation.h"
++#include "gpu/gpu_gles2_export.h"
++#include "ui/gl/gl_bindings.h"
++
++namespace gpu {
++class SharedImageRepresentationFactory;
++}
++
++namespace gpu::gles2 {
++class FeatureInfo;
++
++// Encapsulates FrameBuffer Object and corresponding attachments for use as
++// default framebuffer from command decoders. Only user of default emulated
++// framebuffer is NaCL and hopefully will be deleted at some point.
++class GPU_GLES2_EXPORT GLES2ExternalFramebuffer {
++ public:
++  GLES2ExternalFramebuffer(
++      bool passthrough,
++      const FeatureInfo& feature_info,
++      SharedImageRepresentationFactory* shared_image_representation_factory);
++  ~GLES2ExternalFramebuffer();
++
++  // Attaches new SharedImage (if mailbox is not zero) to the framebuffer and
++  // resolves and detaches previously attached image if any.
++  bool AttachSharedImage(const Mailbox& mailbox,
++                         int samples_count,
++                         bool preserve,
++                         bool need_depth,
++                         bool need_stencil);
++
++  // If the framebuffer is multisampled, resolves the framebuffer into current
++  // SharedImage. If we preserve contents, blits preserved buffer to the shared
++  // image. Detaches shared image from the framebuffer.
++  void ResolveAndDetach();
++
++  GLuint GetFramebufferId() const;
++  bool IsSharedImageAttached() const;
++  void Destroy(bool have_context);
++
++  // Validating command decoder needs these for validation.
++  gfx::Size GetSize() const;
++  GLenum GetColorFormat() const;
++  GLenum GetDepthFormat() const;
++  GLenum GetStencilFormat() const;
++  int GetSamplesCount() const;
++  bool HasAlpha() const;
++  bool HasDepth() const;
++  bool HasStencil() const;
++
++ private:
++  class Attachment;
++
++  bool UpdateAttachment(GLenum attachment,
++                        const gfx::Size& size,
++                        int samples,
++                        GLenum format);
++  std::unique_ptr<Attachment> CreateAttachment(GLenum attachment,
++                                               const gfx::Size& size,
++                                               int samples,
++                                               GLenum format);
++
++  // Caps
++  const bool passthrough_;
++  GLint max_sample_count_ = 0;
++  bool packed_depth_stencil_ = false;
++  bool supports_separate_fbo_bindings_ = false;
++  bool supports_window_rectangles_ = false;
++
++  // Main frame buffer
++  GLuint fbo_ = 0;
++
++  base::flat_map<GLenum, std::unique_ptr<Attachment>> attachments_;
++
++  const raw_ptr<SharedImageRepresentationFactory>
++      shared_image_representation_factory_;
++
++  std::unique_ptr<GLTextureImageRepresentationBase>
++      shared_image_representation_;
++  std::unique_ptr<GLTextureImageRepresentationBase::ScopedAccess>
++      scoped_access_;
++};
++
++}  // namespace gpu::gles2
++
++#endif  // GPU_COMMAND_BUFFER_SERVICE_GLES2_EXTERNAL_FRAMEBUFFER_H_
+diff --git a/gpu/ipc/client/command_buffer_proxy_impl.cc b/gpu/ipc/client/command_buffer_proxy_impl.cc
+index b2b2d4dcf53f4..90648deddefef 100644
+--- a/gpu/ipc/client/command_buffer_proxy_impl.cc
++++ b/gpu/ipc/client/command_buffer_proxy_impl.cc
+@@ -176,6 +176,30 @@ void CommandBufferProxyImpl::OnGpuSwitched(
+     gpu_control_client_->OnGpuSwitched(active_gpu_heuristic);
+ }
+ 
++void CommandBufferProxyImpl::SetDefaultFramebufferSharedImage(
++    const gpu::Mailbox& mailbox,
++    const gpu::SyncToken& sync_token,
++    int samples_count,
++    bool preserve,
++    bool needs_depth,
++    bool needs_stencil) {
++  CheckLock();
++  base::AutoLock lock(last_state_lock_);
++  if (last_state_.error != gpu::error::kNoError)
++    return;
++
++  last_flush_id_ = channel_->EnqueueDeferredMessage(
++      mojom::DeferredRequestParams::NewCommandBufferRequest(
++          mojom::DeferredCommandBufferRequest::New(
++              route_id_,
++              mojom::DeferredCommandBufferRequestParams::
++                  NewSetDefaultFramebufferSharedImage(
++                      mojom::SetDefaultFramebufferSharedImageParams::New(
++                          mailbox, samples_count, preserve, needs_depth,
++                          needs_stencil)))),
++      {sync_token}, /*release_count=*/0);
++}
++
+ void CommandBufferProxyImpl::AddDeletionObserver(DeletionObserver* observer) {
+   base::AutoLockMaybe lock(lock_.get());
+   deletion_observers_.AddObserver(observer);
+diff --git a/gpu/ipc/client/command_buffer_proxy_impl.h b/gpu/ipc/client/command_buffer_proxy_impl.h
+index ca039e8941027..fc4b950b6da7e 100644
+--- a/gpu/ipc/client/command_buffer_proxy_impl.h
++++ b/gpu/ipc/client/command_buffer_proxy_impl.h
+@@ -139,6 +139,14 @@ class GPU_IPC_CLIENT_EXPORT CommandBufferProxyImpl
+                        base::OnceClosure callback) override;
+   void WaitSyncToken(const gpu::SyncToken& sync_token) override;
+   bool CanWaitUnverifiedSyncToken(const gpu::SyncToken& sync_token) override;
++  // PPAPI revival: makes |mailbox| the default framebuffer of this context.
++  // An empty mailbox detaches the previously attached SharedImage.
++  void SetDefaultFramebufferSharedImage(const gpu::Mailbox& mailbox,
++                                        const gpu::SyncToken& sync_token,
++                                        int samples_count,
++                                        bool preserve,
++                                        bool needs_depth,
++                                        bool needs_stencil);
+   void AddDeletionObserver(DeletionObserver* observer);
+   void RemoveDeletionObserver(DeletionObserver* observer);
+ 
+diff --git a/gpu/ipc/common/gpu_channel.mojom b/gpu/ipc/common/gpu_channel.mojom
+index ff3580ab28b34..5a010805caead 100644
+--- a/gpu/ipc/common/gpu_channel.mojom
++++ b/gpu/ipc/common/gpu_channel.mojom
+@@ -406,6 +406,10 @@ union DeferredCommandBufferRequestParams {
+ 
+   // Destroys a transfer buffer identified by this ID.
+   int32 destroy_transfer_buffer;
++
++  // Allows to attach SharedImage to default framebuffer of this context.
++  // NOTE: Used only by the revived PPAPI Graphics3D path (Flash Stage3D).
++  SetDefaultFramebufferSharedImageParams set_default_framebuffer_shared_image;
+ };
+ 
+ // Details of a batched request pertaining to shared image management.
+@@ -477,6 +481,28 @@ struct AsyncFlushParams {
+   array<SyncToken> sync_token_fences;
+ };
+ 
++// PPAPI revival: sets a SharedImage mailbox (and framebuffer parameters) as the
++// command buffer's default framebuffer. Removed from Chromium long before 140
++// together with PPAPI Graphics3D support; restored here so Flash Stage3D can
++// render into a compositor-visible SharedImage.
++struct SetDefaultFramebufferSharedImageParams {
++  // The mailbox of the shared image. Can be empty if client wants to detach
++  // SharedImage from the color buffer.
++  Mailbox mailbox;
++
++  // Number of samples for the multisampling.
++  uint32 samples_count;
++
++  // If default framebuffer needs to preserve contents across the frames.
++  bool preserve;
++
++  // If this framebuffer needs depth buffer.
++  bool needs_depth;
++
++  // If this framebuffer needs stencil buffer.
++  bool needs_stencil;
++};
++
+ // Common params used when creating a new shared image.
+ struct SharedImageInfo {
+   // Metadata about the shared image being created.
+diff --git a/gpu/ipc/service/command_buffer_stub.cc b/gpu/ipc/service/command_buffer_stub.cc
+index d222043f3032b..a13d7d4d3fc1c 100644
+--- a/gpu/ipc/service/command_buffer_stub.cc
++++ b/gpu/ipc/service/command_buffer_stub.cc
+@@ -166,6 +166,15 @@ void CommandBufferStub::ExecuteDeferredRequest(
+     case mojom::DeferredCommandBufferRequestParams::Tag::kDestroyTransferBuffer:
+       OnDestroyTransferBuffer(params.get_destroy_transfer_buffer());
+       break;
++
++    case mojom::DeferredCommandBufferRequestParams::Tag::
++        kSetDefaultFramebufferSharedImage: {
++      auto& attach = *params.get_set_default_framebuffer_shared_image();
++      OnSetDefaultFramebufferSharedImage(attach.mailbox, attach.samples_count,
++                                         attach.preserve, attach.needs_depth,
++                                         attach.needs_stencil);
++      break;
++    }
+   }
+ 
+   if (!context_label_.empty()) {
+diff --git a/gpu/ipc/service/command_buffer_stub.h b/gpu/ipc/service/command_buffer_stub.h
+index 133cb7c16d3d9..5b6686550854c 100644
+--- a/gpu/ipc/service/command_buffer_stub.h
++++ b/gpu/ipc/service/command_buffer_stub.h
+@@ -228,6 +228,14 @@ class GPU_IPC_SERVICE_EXPORT CommandBufferStub
+   void SignalSyncToken(const SyncToken& sync_token, uint32_t id) override;
+   void SignalQuery(uint32_t query, uint32_t id) override;
+ 
++  // PPAPI revival: attaches a SharedImage to the command buffer's default
++  // framebuffer (used by PPB_Graphics3D for Flash Stage3D).
++  virtual void OnSetDefaultFramebufferSharedImage(const Mailbox& mailbox,
++                                                  int samples_count,
++                                                  bool preserve,
++                                                  bool needs_depth,
++                                                  bool needs_stencil) {}
++
+   scoped_refptr<MemoryTracker> CreateMemoryTracker() const;
+ 
+   // Must be called during Initialize(). Takes ownership to co-ordinate
+diff --git a/gpu/ipc/service/gles2_command_buffer_stub.cc b/gpu/ipc/service/gles2_command_buffer_stub.cc
+index d77eec13d6641..0032e5d08f568 100644
+--- a/gpu/ipc/service/gles2_command_buffer_stub.cc
++++ b/gpu/ipc/service/gles2_command_buffer_stub.cc
+@@ -357,6 +357,18 @@ void GLES2CommandBufferStub::OnGpuSwitched(
+   client().OnGpuSwitched(active_gpu_heuristic);
+ }
+ 
++void GLES2CommandBufferStub::OnSetDefaultFramebufferSharedImage(
++    const Mailbox& mailbox,
++    int samples_count,
++    bool preserve,
++    bool needs_depth,
++    bool needs_stencil) {
++  if (gles2_decoder_) {
++    gles2_decoder_->SetDefaultFramebufferSharedImage(
++        mailbox, samples_count, preserve, needs_depth, needs_stencil);
++  }
++}
++
+ void GLES2CommandBufferStub::CreateGpuFenceFromHandle(
+     uint32_t gpu_fence_id,
+     gfx::GpuFenceHandle handle) {
+diff --git a/gpu/ipc/service/gles2_command_buffer_stub.h b/gpu/ipc/service/gles2_command_buffer_stub.h
+index 16235a06afd2c..a1894d2729f1d 100644
+--- a/gpu/ipc/service/gles2_command_buffer_stub.h
++++ b/gpu/ipc/service/gles2_command_buffer_stub.h
+@@ -48,6 +48,11 @@ class GPU_IPC_SERVICE_EXPORT GLES2CommandBufferStub final
+                                 gfx::GpuFenceHandle handle) override;
+   void GetGpuFenceHandle(uint32_t gpu_fence_id,
+                          GetGpuFenceHandleCallback callback) override;
++  void OnSetDefaultFramebufferSharedImage(const Mailbox& mailbox,
++                                          int samples_count,
++                                          bool preserve,
++                                          bool needs_depth,
++                                          bool needs_stencil) override;
+ 
+   // The group of contexts that share namespaces with this context.
+   scoped_refptr<gles2::ContextGroup> context_group_;
+-- 
+2.55.0.windows.2
+
+
+From 40d4e9a557e60e27263f93dedfb6c0f745ba0926 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 15:44:39 +0800
+Subject: [PATCH 08/11] =?UTF-8?q?feat(pepper):=20=E6=89=93=E5=BC=80=20Flas?=
+ =?UTF-8?q?h=20Stage3D=20=E2=80=94=E2=80=94=20=E4=BF=AE=E6=8E=89=20prefere?=
+ =?UTF-8?q?nces=20=E9=87=8C=E7=9A=84=E7=A1=AC=E7=BC=96=E7=A0=81=20false=20?=
+ =?UTF-8?q?=E4=B8=8E=20GLES2=20=E5=88=9D=E5=A7=8B=E5=8C=96=E5=A4=B1?=
+ =?UTF-8?q?=E8=B4=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+根因（本体项目 C87 是 driver=OpenGL，我们的 138/140 都是 Software Hw_disabled=unavailable）：
+
+1. content/renderer/pepper/ppapi_preferences_builder.cc 把
+   is_3d_supported / is_stage3d_supported / is_stage3d_baseline_supported 硬编码成 false
+   —— 这是上游删除 Flash 时留下的残骸。Flash 在创建 Context3D 之前会先
+   PPB_Flash::GetSetting(PP_FLASHSETTING_STAGE3DENABLED)（实测日志：setting=1 与 setting=3），
+   flash_resource.cc 直接返回这三个字段，于是 Flash 判定"浏览器未启用 Stage3D"，
+   根本不发 PPBGraphics3D_Create。
+   → 改为按真实 GPU 状态（GPU_FEATURE_TYPE_ACCELERATED_GL）给出。
+
+2. 修好 (1) 后 Flash 确实开始创建 3D 上下文，但插件侧 GLES2 初始化仍失败：
+   ppb_graphics_3d_shared.cc 给 GLES2Implementation 传的是硬编码
+   bind_generates_resource=true，而 140 的 passthrough 解码器上报 false，
+   GLES2Implementation::Initialize 因此直接 kFatalFailure
+   （"bind_generates_resource mismatch"）。
+   → 改为读取 GetGpuControl()->GetGLCapabilities().bind_generates_resource_chromium。
+
+3. 关键取舍：is_3d_supported 同时会让 Flash 的**2D**渲染切到 GPU 路径，
+   而该路径在本移植里目前合成为空白（整屏白）。所以暂时只放开 Stage3D 两个字段，
+   保持 2D 走已验证的软件路径。is_3d_supported 留待 3D 合成打通后再开。
+
+附带诊断日志（失败才打印，常态无噪音）：
+- ppb_graphics_3d_proxy.cc: CreateProxyResource 返回空 / CreateGLES2Impl 失败
+- ppb_graphics_3d_impl.cc: InitRaw 各失败分支
+
+验证：
+- Stage3D（wmode=direct）：CreateGLES2Impl 不再失败，DoSwapBuffers bound=1 —— 上下文真正成立
+- FlxInvaders / Canabalt 回归：interactive=3，digests 各不相同，无 CHECK/FATAL
+- 已知未完成：3D 图层合成出来仍是白屏（下一步）
+---
+ .../pepper/ppapi_preferences_builder.cc       | 18 +++++++++++--
+ .../renderer/pepper/ppb_graphics_3d_impl.cc   | 25 +++++++++++++-----
+ .../client/gles2_implementation.cc            |  1 +
+ ppapi/proxy/ppb_graphics_3d_proxy.cc          | 10 +++++--
+ ppapi/shared_impl/ppb_graphics_3d_shared.cc   | 26 ++++++++++++++++---
+ 5 files changed, 66 insertions(+), 14 deletions(-)
+
+diff --git a/content/renderer/pepper/ppapi_preferences_builder.cc b/content/renderer/pepper/ppapi_preferences_builder.cc
+index fc8575cafc0da..7894f169ded2e 100644
+--- a/content/renderer/pepper/ppapi_preferences_builder.cc
++++ b/content/renderer/pepper/ppapi_preferences_builder.cc
+@@ -27,9 +27,23 @@ ppapi::Preferences PpapiPreferencesBuilder::Build(
+   ppapi_prefs.default_font_size = prefs.default_font_size;
+   ppapi_prefs.default_fixed_font_size = prefs.default_fixed_font_size;
+   ppapi_prefs.number_of_cpu_cores = prefs.number_of_cpu_cores;
++  // PPAPI revival: when Chromium removed Flash it left these three hardcoded to
++  // false. Flash reads them through PPB_Flash::GetSetting
++  // (PP_FLASHSETTING_3DENABLED / PP_FLASHSETTING_STAGE3DENABLED) *before* it
++  // creates a Context3D, so a false answer makes every Flash build fall back to
++  // its software renderer ("driverInfo = Software Hw_disabled=unavailable")
++  // without ever calling PPB_Graphics3D. Derive them from the real GPU status,
++  // like the pre-removal implementation did via
++  // WebPreferences::flash_3d_enabled / flash_stage3d_enabled.
++  const bool gpu_accelerated =
++      gpu_feature_info.status_values[gpu::GPU_FEATURE_TYPE_ACCELERATED_GL] ==
++      gpu::kGpuFeatureStatusEnabled;
++  // Only advertise Stage3D; is_3d_supported also switches Flash's *2D*
++  // renderer to the GPU path, which currently composites as a blank (white)
++  // layer in this port, so keep 2D on the proven software path for now.
+   ppapi_prefs.is_3d_supported = false;
+-  ppapi_prefs.is_stage3d_supported = false;
+-  ppapi_prefs.is_stage3d_baseline_supported = false;
++  ppapi_prefs.is_stage3d_supported = gpu_accelerated;
++  ppapi_prefs.is_stage3d_baseline_supported = gpu_accelerated;
+   ppapi_prefs.is_accelerated_video_decode_enabled =
+       (prefs.accelerated_video_decode_enabled &&
+        (gpu_feature_info
+diff --git a/content/renderer/pepper/ppb_graphics_3d_impl.cc b/content/renderer/pepper/ppb_graphics_3d_impl.cc
+index a9323cfccd222..e3e73ff281964 100644
+--- a/content/renderer/pepper/ppb_graphics_3d_impl.cc
++++ b/content/renderer/pepper/ppb_graphics_3d_impl.cc
+@@ -314,12 +314,16 @@ bool PPB_Graphics3D_Impl::InitRaw(
+     gpu::CommandBufferId* command_buffer_id) {
+   PepperPluginInstanceImpl* plugin_instance =
+       HostGlobals::Get()->GetInstance(pp_instance());
+-  if (!plugin_instance)
++  if (!plugin_instance) {
++    LOG(ERROR) << "[g3d] InitRaw: no plugin instance";
+     return false;
++  }
+ 
+   RenderFrame* render_frame = plugin_instance->GetRenderFrame();
+-  if (!render_frame)
++  if (!render_frame) {
++    LOG(ERROR) << "[g3d] InitRaw: no render frame";
+     return false;
++  }
+ 
+   const blink::web_pref::WebPreferences& prefs =
+       render_frame->GetBlinkPreferences();
+@@ -329,15 +333,21 @@ bool PPB_Graphics3D_Impl::InitRaw(
+   (void)prefs;
+ 
+   RenderThreadImpl* render_thread = RenderThreadImpl::current();
+-  if (!render_thread)
++  if (!render_thread) {
++    LOG(ERROR) << "[g3d] InitRaw: no render thread";
+     return false;
+-  if (render_thread->IsGpuCompositingDisabled())
++  }
++  if (render_thread->IsGpuCompositingDisabled()) {
++    LOG(ERROR) << "[g3d] InitRaw: gpu compositing disabled";
+     return false;
++  }
+ 
+   scoped_refptr<gpu::GpuChannelHost> channel =
+       render_thread->EstablishGpuChannelSync();
+-  if (!channel)
++  if (!channel) {
++    LOG(ERROR) << "[g3d] InitRaw: no gpu channel";
+     return false;
++  }
+   // 3D access might be blocklisted.
+   if (channel->gpu_feature_info()
+           .status_values[gpu::GPU_FEATURE_TYPE_ACCELERATED_WEBGL] ==
+@@ -377,8 +387,11 @@ bool PPB_Graphics3D_Impl::InitRaw(
+       base::SingleThreadTaskRunner::GetCurrentDefault());
+   auto result = command_buffer_->Initialize(
+       share_buffer, kGpuStreamPriorityDefault, attrib_helper, GURL(), "Pepper");
+-  if (result != gpu::ContextResult::kSuccess)
++  if (result != gpu::ContextResult::kSuccess) {
++    LOG(ERROR) << "[g3d] InitRaw: command buffer init failed result="
++               << static_cast<int>(result);
+     return false;
++  }
+ 
+   command_buffer_->SetGpuControlClient(this);
+ 
+diff --git a/gpu/command_buffer/client/gles2_implementation.cc b/gpu/command_buffer/client/gles2_implementation.cc
+index 4bcaa120e4198..0ad969bad7c76 100644
+--- a/gpu/command_buffer/client/gles2_implementation.cc
++++ b/gpu/command_buffer/client/gles2_implementation.cc
+@@ -312,6 +312,7 @@ gpu::ContextResult GLES2Implementation::Initialize(
+   // on Client & Service.
+   if (gl_capabilities_.bind_generates_resource_chromium !=
+       (share_group_->bind_generates_resource() ? 1 : 0)) {
++    LOG(ERROR) << "[g3d] bind_generates_resource mismatch -> kFatalFailure";
+     SetGLError(GL_INVALID_OPERATION, "Initialize",
+                "Service bind_generates_resource mismatch.");
+     LOG(ERROR) << "ContextResult::kFatalFailure: "
+diff --git a/ppapi/proxy/ppb_graphics_3d_proxy.cc b/ppapi/proxy/ppb_graphics_3d_proxy.cc
+index b8a3a64c5b8da..da5f7215406e6 100644
+--- a/ppapi/proxy/ppb_graphics_3d_proxy.cc
++++ b/ppapi/proxy/ppb_graphics_3d_proxy.cc
+@@ -75,7 +75,11 @@ bool Graphics3D::Init(gpu::gles2::GLES2Implementation* share_gles2,
+       host_resource(), &data->flush_info, dispatcher, capabilities,
+       gl_capabilities, std::move(shared_state), command_buffer_id);
+ 
+-  return CreateGLES2Impl(share_gles2);
++  const bool gles2_ok = CreateGLES2Impl(share_gles2);
++  if (!gles2_ok) {
++    LOG(ERROR) << "[g3d] Graphics3D::Init: CreateGLES2Impl failed";
++  }
++  return gles2_ok;
+ }
+ 
+ PP_Bool Graphics3D::SetGetBuffer(int32_t /* transfer_buffer_id */) {
+@@ -246,8 +250,10 @@ PP_Resource PPB_Graphics3D_Proxy::CreateProxyResource(
+       API_ID_PPB_GRAPHICS_3D, instance, share_host, attrib_helper, &result,
+       &capabilities, &gl_capabilities, &shared_state, &command_buffer_id));
+ 
+-  if (result.is_null())
++  if (result.is_null()) {
++    LOG(ERROR) << "[g3d] CreateProxyResource: renderer returned null resource";
+     return 0;
++  }
+ 
+   scoped_refptr<Graphics3D> graphics_3d(
+       new Graphics3D(result, attrib_helper.offscreen_framebuffer_size));
+diff --git a/ppapi/shared_impl/ppb_graphics_3d_shared.cc b/ppapi/shared_impl/ppb_graphics_3d_shared.cc
+index c6618998157eb..61a80acd6bf08 100644
+--- a/ppapi/shared_impl/ppb_graphics_3d_shared.cc
++++ b/ppapi/shared_impl/ppb_graphics_3d_shared.cc
+@@ -12,6 +12,7 @@
+ #include "base/logging.h"
+ #include "gpu/GLES2/gl2extchromium.h"
+ #include "gpu/command_buffer/client/gles2_cmd_helper.h"
++#include "gpu/command_buffer/client/gpu_control.h"
+ #include "gpu/command_buffer/client/gles2_implementation.h"
+ #include "gpu/command_buffer/client/shared_memory_limits.h"
+ #include "gpu/command_buffer/client/transfer_buffer.h"
+@@ -130,15 +131,28 @@ bool PPB_Graphics3D_Shared::CreateGLES2Impl(
+ 
+   // Create the GLES2 helper, which writes the command buffer protocol.
+   gles2_helper_ = std::make_unique<gpu::gles2::GLES2CmdHelper>(command_buffer);
+-  if (gles2_helper_->Initialize(limits.command_buffer_size) !=
+-      gpu::ContextResult::kSuccess)
++  const auto helper_result =
++      gles2_helper_->Initialize(limits.command_buffer_size);
++  if (helper_result != gpu::ContextResult::kSuccess) {
++    LOG(ERROR) << "[g3d] GLES2CmdHelper::Initialize failed result="
++               << static_cast<int>(helper_result)
++               << " cmd_buf_size=" << limits.command_buffer_size;
+     return false;
++  }
+ 
+   // Create a transfer buffer used to copy resources between the renderer
+   // process and the GPU process.
+   transfer_buffer_ = std::make_unique<gpu::TransferBuffer>(gles2_helper_.get());
+ 
+-  const bool bind_creates_resources = true;
++  // PPAPI revival: the GPU service reports whether resource names are generated
++  // on the service side (bind_generates_resource). Chromium 138+ reports false
++  // for the passthrough decoder, while GLES2Implementation::Initialize hard
++  // fails on a mismatch with its ShareGroup ("bind_generates_resource
++  // mismatch" -> kFatalFailure), which used to make every PPB_Graphics3D
++  // creation fail in the plugin process and pushed Flash Stage3D back to its
++  // software renderer. Follow the reported capability instead of hardcoding.
++  const bool bind_creates_resources =
++      GetGpuControl()->GetGLCapabilities().bind_generates_resource_chromium != 0;
+   const bool lose_context_when_out_of_memory = false;
+   const bool support_client_side_arrays = true;
+ 
+@@ -149,8 +163,12 @@ bool PPB_Graphics3D_Shared::CreateGLES2Impl(
+       lose_context_when_out_of_memory, support_client_side_arrays,
+       GetGpuControl());
+ 
+-  if (gles2_impl_->Initialize(limits) != gpu::ContextResult::kSuccess)
++  const auto impl_result = gles2_impl_->Initialize(limits);
++  if (impl_result != gpu::ContextResult::kSuccess) {
++    LOG(ERROR) << "[g3d] GLES2Implementation::Initialize failed result="
++               << static_cast<int>(impl_result);
+     return false;
++  }
+ 
+   gles2_impl_->TraceBeginCHROMIUM("gpu_toplevel", "PPAPIContext");
+ 
+-- 
+2.55.0.windows.2
+
+
+From 1a23dc419e8284e696fbdc2f43967110bf209f78 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 19:33:27 +0800
+Subject: [PATCH 09/11] =?UTF-8?q?feat(gpu):=20=E6=81=A2=E5=A4=8D=20glSwapB?=
+ =?UTF-8?q?uffers=20=E5=91=BD=E4=BB=A4=E9=93=BE=EF=BC=88=E7=85=A7=E6=8A=84?=
+ =?UTF-8?q?=20Chromium=2087=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+背景：140 把 `SwapBuffers` 命令连同 PPAPI/PNaCl swapchain 一起删了
+（客户端 API、命令 ID、命令结构、解码器 handler/doer 全无）。
+Flash 的 Stage3D `present()` 依赖它，导致"画了但上不了屏"。
+
+本次全部照抄 87.0.4280.0（本地 git tag），未自创实现：
+
+| 层 | 文件 | 内容 |
+| --- | --- | --- |
+| 命令 ID | gles2_cmd_ids_autogen.h | 新增 `OP(SwapBuffers) /* 594 */` |
+| 命令结构 | gles2_cmd_format_autogen.h | `struct SwapBuffers`（header/swap_id_0/swap_id_1/flags，16B） |
+| 客户端 helper | gles2_cmd_helper_autogen.h | `SwapBuffers(swap_id, flags)` |
+| 客户端实现 | gles2_implementation.{h,cc} | `GLES2Implementation::SwapBuffers()`（照 87，简化：不排队 token） |
+| 解码器（passthrough） | gles2_cmd_decoder_passthrough_handlers_autogen.cc | `HandleSwapBuffers` |
+| 解码器（doer） | gles2_cmd_decoder_passthrough_doers.cc | `DoSwapBuffers`（本移植把 FB0 直接映射到共享图像，无需 87 的 back→front 拷贝，仅记录） |
+| 解码器（validating） | gles2_cmd_decoder_autogen.h | `HandleSwapBuffers`（该解码器不用于 PPAPI 3D，仅满足分发表） |
+| PPAPI | ppapi/proxy/ppb_graphics_3d_proxy.{h,cc} | `swap_id_` 成员 + `DoSwapBuffers` 里补 `gl->SwapBuffers(swap_id_++)` |
+
+验证：
+- 构建通过（0 错误）
+- 解码器确认收到 swap：`GLES2DecoderPassthroughImpl::DoSwapBuffers ...`（VLOG）
+- 2D 回归：FlxInvaders / Canabalt 均 interactive=3、digests 各不相同、无 CHECK/FATAL
+- Stage3D（Stage3DDrawTri，真 program + drawTriangles）：AS3 全链路 ok（driver=OpenGL、
+  program uploaded、draw=ok、present=ok），但画面仍白 —— 说明 Flash 的合成到 FB0 仍未发生，
+  下一步需继续对照 87 的 front-buffer 语义（本提交先把命令链补齐，不改变现有行为）
+---
+ .../client/gles2_cmd_helper_autogen.h         |  7 +++
+ .../client/gles2_implementation.cc            |  8 ++++
+ .../client/gles2_implementation.h             |  6 +++
+ .../common/gles2_cmd_format_autogen.h         | 46 +++++++++++++++++++
+ .../common/gles2_cmd_ids_autogen.h            |  3 +-
+ .../service/gles2_cmd_decoder_autogen.h       | 14 ++++++
+ .../gles2_cmd_decoder_passthrough_doers.cc    | 12 +++++
+ ...md_decoder_passthrough_handlers_autogen.cc | 15 ++++++
+ ppapi/proxy/ppb_graphics_3d_proxy.cc          |  6 +++
+ ppapi/proxy/ppb_graphics_3d_proxy.h           |  4 ++
+ 10 files changed, 120 insertions(+), 1 deletion(-)
+
+diff --git a/gpu/command_buffer/client/gles2_cmd_helper_autogen.h b/gpu/command_buffer/client/gles2_cmd_helper_autogen.h
+index 63cd05e58b134..f3bdcbb0bc629 100644
+--- a/gpu/command_buffer/client/gles2_cmd_helper_autogen.h
++++ b/gpu/command_buffer/client/gles2_cmd_helper_autogen.h
+@@ -3426,4 +3426,11 @@ void PolygonOffsetClampEXT(GLfloat factor, GLfloat units, GLfloat clamp) {
+   }
+ }
+ 
++void SwapBuffers(GLuint64 swap_id, GLbitfield flags) {
++  gles2::cmds::SwapBuffers* c = GetCmdSpace<gles2::cmds::SwapBuffers>();
++  if (c) {
++    c->Init(swap_id, flags);
++  }
++}
++
+ #endif  // GPU_COMMAND_BUFFER_CLIENT_GLES2_CMD_HELPER_AUTOGEN_H_
+diff --git a/gpu/command_buffer/client/gles2_implementation.cc b/gpu/command_buffer/client/gles2_implementation.cc
+index 0ad969bad7c76..76bd731defc6a 100644
+--- a/gpu/command_buffer/client/gles2_implementation.cc
++++ b/gpu/command_buffer/client/gles2_implementation.cc
+@@ -477,6 +477,14 @@ void GLES2Implementation::OnGpuControlReturnData(
+   }
+ }
+ 
++// PPAPI revival: restored from Chromium 87 (Flash Stage3D present path).
++void GLES2Implementation::SwapBuffers(uint64_t swap_id, GLbitfield flags) {
++  GPU_CLIENT_SINGLE_THREAD_CHECK();
++  GPU_CLIENT_LOG("[" << GetLogPrefix() << "] glSwapBuffers()");
++  helper_->SwapBuffers(swap_id, flags);
++  helper_->CommandBufferHelper::Flush();
++}
++
+ void GLES2Implementation::FreeSharedMemory(void* mem) {
+   mapped_memory_->FreePendingToken(mem, helper_->InsertToken());
+ }
+diff --git a/gpu/command_buffer/client/gles2_implementation.h b/gpu/command_buffer/client/gles2_implementation.h
+index e45e77776e192..4442b0aa9ef7e 100644
+--- a/gpu/command_buffer/client/gles2_implementation.h
++++ b/gpu/command_buffer/client/gles2_implementation.h
+@@ -125,6 +125,12 @@ class GLES2_IMPL_EXPORT GLES2Implementation : public GLES2Interface,
+   void FreeSharedMemory(void*) override;
+   GLboolean DidGpuSwitch(gl::GpuPreference* active_gpu) final;
+ 
++  // PPAPI revival: issues the glSwapBuffers command. Chromium removed it after
++  // PPAPI (and PNaCl) swapchain support was deleted; Flash's Stage3D present
++  // path still needs it, so it is restored here (not part of GLES2Interface,
++  // to avoid touching every implementation of that interface).
++  void SwapBuffers(uint64_t swap_id, GLbitfield flags);
++
+   // Include the auto-generated part of this class. We split this because
+   // it means we can easily edit the non-auto generated parts right here in
+   // this file instead of having to edit some template or the code generator.
+diff --git a/gpu/command_buffer/common/gles2_cmd_format_autogen.h b/gpu/command_buffer/common/gles2_cmd_format_autogen.h
+index 2d6c98a5a8324..093c067b5edec 100644
+--- a/gpu/command_buffer/common/gles2_cmd_format_autogen.h
++++ b/gpu/command_buffer/common/gles2_cmd_format_autogen.h
+@@ -16833,4 +16833,50 @@ static_assert(offsetof(PolygonOffsetClampEXT, units) == 8,
+ static_assert(offsetof(PolygonOffsetClampEXT, clamp) == 12,
+               "offset of PolygonOffsetClampEXT clamp should be 12");
+ 
++// PPAPI revival: restored from Chromium 87 for Flash Stage3D present().
++struct SwapBuffers {
++  typedef SwapBuffers ValueType;
++  static const CommandId kCmdId = kSwapBuffers;
++  static const cmd::ArgFlags kArgFlags = cmd::kFixed;
++  static const uint8_t cmd_flags = CMD_FLAG_SET_TRACE_LEVEL(3);
++
++  static uint32_t ComputeSize() {
++    return static_cast<uint32_t>(sizeof(ValueType));  // NOLINT
++  }
++
++  void SetHeader() { header.SetCmd<ValueType>(); }
++
++  void Init(GLuint64 _swap_id, GLbitfield _flags) {
++    SetHeader();
++    GLES2Util::MapUint64ToTwoUint32(static_cast<uint64_t>(_swap_id), &swap_id_0,
++                                    &swap_id_1);
++    flags = _flags;
++  }
++
++  void* Set(void* cmd, GLuint64 _swap_id, GLbitfield _flags) {
++    static_cast<ValueType*>(cmd)->Init(_swap_id, _flags);
++    return NextCmdAddress<ValueType>(cmd);
++  }
++
++  GLuint64 swap_id() const volatile {
++    return static_cast<GLuint64>(
++        GLES2Util::MapTwoUint32ToUint64(swap_id_0, swap_id_1));
++  }
++
++  gpu::CommandHeader header;
++  uint32_t swap_id_0;
++  uint32_t swap_id_1;
++  GLbitfield flags;
++};
++
++static_assert(sizeof(SwapBuffers) == 16, "size of SwapBuffers should be 16");
++static_assert(offsetof(SwapBuffers, header) == 0,
++              "offset of SwapBuffers header should be 0");
++static_assert(offsetof(SwapBuffers, swap_id_0) == 4,
++              "offset of SwapBuffers swap_id_0 should be 4");
++static_assert(offsetof(SwapBuffers, swap_id_1) == 8,
++              "offset of SwapBuffers swap_id_1 should be 8");
++static_assert(offsetof(SwapBuffers, flags) == 12,
++              "offset of SwapBuffers flags should be 12");
++
+ #endif  // GPU_COMMAND_BUFFER_COMMON_GLES2_CMD_FORMAT_AUTOGEN_H_
+diff --git a/gpu/command_buffer/common/gles2_cmd_ids_autogen.h b/gpu/command_buffer/common/gles2_cmd_ids_autogen.h
+index f2572f09b8e51..fb5d15b807413 100644
+--- a/gpu/command_buffer/common/gles2_cmd_ids_autogen.h
++++ b/gpu/command_buffer/common/gles2_cmd_ids_autogen.h
+@@ -349,7 +349,8 @@
+   OP(GetFramebufferPixelLocalStorageParameterivANGLE)          /* 590 */ \
+   OP(ClipControlEXT)                                           /* 591 */ \
+   OP(PolygonModeANGLE)                                         /* 592 */ \
+-  OP(PolygonOffsetClampEXT)                                    /* 593 */
++  OP(PolygonOffsetClampEXT)                                    /* 593 */ \
++    OP(SwapBuffers)                                              /* 594 */
+ 
+ enum CommandId {
+   kOneBeforeStartPoint =
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_autogen.h b/gpu/command_buffer/service/gles2_cmd_decoder_autogen.h
+index ae662bdf5c039..01a52204228c4 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_autogen.h
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_autogen.h
+@@ -38,6 +38,20 @@ error::Error GLES2DecoderImpl::HandleAttachShader(
+   return error::kNoError;
+ }
+ 
++// PPAPI revival: restored from Chromium 87 (Flash Stage3D present path).
++// The validating decoder is not used by PPAPI 3D contexts in this build, so the
++// swap only has to be accepted without error.
++error::Error GLES2DecoderImpl::HandleSwapBuffers(uint32_t immediate_data_size,
++                                                const volatile void* cmd_data) {
++  const volatile gles2::cmds::SwapBuffers& c =
++      *static_cast<const volatile gles2::cmds::SwapBuffers*>(cmd_data);
++  if (!validators_->framebuffer_target.IsValid(0)) {
++    // no-op: SwapBuffers has no GLenum param to validate
++  }
++  (void)c;
++  return error::kNoError;
++}
++
+ error::Error GLES2DecoderImpl::HandleBindBuffer(uint32_t immediate_data_size,
+                                                 const volatile void* cmd_data) {
+   const volatile gles2::cmds::BindBuffer& c =
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_doers.cc b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_doers.cc
+index 724b51764e1b1..cfe449a921c46 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_doers.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_doers.cc
+@@ -971,6 +971,18 @@ error::Error GLES2DecoderPassthroughImpl::DoCopyTexSubImage3D(GLenum target,
+   return error::kNoError;
+ }
+ 
++// PPAPI revival: restored from Chromium 87. In 87 this blitted the emulated
++// back buffer into the emulated front buffer; here FB 0 is bound directly to the
++// compositor-visible SharedImage, so no copy is required — the swap only has to
++// exist so that Flash's present() has a command to issue and the client's
++// command stream stays in sync.
++error::Error GLES2DecoderPassthroughImpl::DoSwapBuffers(uint64_t swap_id,
++                                                        GLbitfield flags) {
++  VLOG(1) << "GLES2DecoderPassthroughImpl::DoSwapBuffers id=" << swap_id
++          << " flags=" << flags;
++  return error::kNoError;
++}
++
+ error::Error GLES2DecoderPassthroughImpl::DoCreateProgram(GLuint client_id) {
+   return CreateHelper(client_id, &resources_->program_id_map,
+                       [this]() { return api()->glCreateProgramFn(); });
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_handlers_autogen.cc b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_handlers_autogen.cc
+index 7311102b9868c..ffde00e114d82 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_handlers_autogen.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough_handlers_autogen.cc
+@@ -13,6 +13,21 @@
+ namespace gpu {
+ namespace gles2 {
+ 
++// PPAPI revival: restored from Chromium 87 (Flash Stage3D present path).
++error::Error GLES2DecoderPassthroughImpl::HandleSwapBuffers(
++    uint32_t immediate_data_size,
++    const volatile void* cmd_data) {
++  const volatile gles2::cmds::SwapBuffers& c =
++      *static_cast<const volatile gles2::cmds::SwapBuffers*>(cmd_data);
++  GLuint64 swap_id = c.swap_id();
++  GLbitfield flags = static_cast<GLbitfield>(c.flags);
++  error::Error error = DoSwapBuffers(swap_id, flags);
++  if (error != error::kNoError) {
++    return error;
++  }
++  return error::kNoError;
++}
++
+ error::Error GLES2DecoderPassthroughImpl::HandleActiveTexture(
+     uint32_t immediate_data_size,
+     const volatile void* cmd_data) {
+diff --git a/ppapi/proxy/ppb_graphics_3d_proxy.cc b/ppapi/proxy/ppb_graphics_3d_proxy.cc
+index da5f7215406e6..fdd754066e207 100644
+--- a/ppapi/proxy/ppb_graphics_3d_proxy.cc
++++ b/ppapi/proxy/ppb_graphics_3d_proxy.cc
+@@ -136,6 +136,12 @@ int32_t Graphics3D::DoSwapBuffers(const gpu::SyncToken& sync_token,
+ 
+   gpu::gles2::GLES2Implementation* gl = gles2_impl();
+ 
++  // PPAPI revival: Chromium 87 issued the real glSwapBuffers command here; the
++  // command was removed together with PPAPI/PNaCl swapchain support. Flash's
++  // Stage3D present() path relies on it, so it has been restored in gpu/ and is
++  // issued again before flushing.
++  gl->SwapBuffers(swap_id_++, 0);
++
+   // Flush current GL commands.
+   gl->ShallowFlushCHROMIUM();
+ 
+diff --git a/ppapi/proxy/ppb_graphics_3d_proxy.h b/ppapi/proxy/ppb_graphics_3d_proxy.h
+index fbf20ab3220b8..0830595134fc9 100644
+--- a/ppapi/proxy/ppb_graphics_3d_proxy.h
++++ b/ppapi/proxy/ppb_graphics_3d_proxy.h
+@@ -71,6 +71,10 @@ class PPAPI_PROXY_EXPORT Graphics3D : public PPB_Graphics3D_Shared {
+   void DoResize(gfx::Size size) override;
+ 
+   std::unique_ptr<PpapiCommandBufferProxy> command_buffer_;
++
++  // PPAPI revival: swap id counter for the restored glSwapBuffers command
++  // (Chromium 87 had it; removed together with PPAPI swapchain support).
++  uint64_t swap_id_ = 0;
+ };
+ 
+ class PPB_Graphics3D_Proxy : public InterfaceProxy {
+-- 
+2.55.0.windows.2
+
+
+From 738b0b15e79c5b7b3063d79fd6d636468a7f9f89 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 19:49:43 +0800
+Subject: [PATCH 10/11] =?UTF-8?q?feat(pepper):=20Stage3D=20=E5=87=BA?=
+ =?UTF-8?q?=E7=94=BB=E9=9D=A2=20=E2=80=94=E2=80=94=20=E8=A1=A5=E5=9B=9E=20?=
+ =?UTF-8?q?3D=20SwapBuffersACK=20=E4=B8=8E=E5=A4=96=E9=83=A8=E5=B8=A7?=
+ =?UTF-8?q?=E7=BC=93=E5=86=B2=E9=94=80=E6=AF=81?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+两个都是"140 删了、我们恢复时漏了"的部件：
+
+1. content/renderer/pepper/ppb_graphics_3d_impl.{h,cc}
+   140 删掉了 WebLocalFrameClient::DidCommitAndDrawCompositorFrame，而它正是
+   PepperPluginInstanceImpl::ViewInitiatedPaint() 的唯一触发点，3D 的
+   SwapBuffersACK 就挂在这条链上。结果是 Flash present 一次之后永远等不到 ACK，
+   渲染循环停摆（实测：整场只有 1 次 DoSwapBuffers、ENTER_FRAME 不推进、画面全白）。
+   → 新增 RequestSwapAckAfterPresentation()：DoSwapBuffers 里 commit 之后调用
+   WebFrameWidget::InsertVisualStateRequest()（与 2D FlushAck 同一套"呈现后回包"机制），
+   回调里执行 ViewInitiatedPaint() 发 ACK；无合成器时立即 ACK。
+
+2. gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+   138 的 Destroy() 会显式销毁 external_default_framebuffer_，140 移植时漏了，
+   导致 ~GLES2ExternalFramebuffer 的 DCHECK(fbo_ == 0) 失败 → **GPU 进程崩溃**
+   （实测日志：FATAL gles2_external_framebuffer.cc:310 DCHECK failed: fbo_ == 0u (2 vs 0)，
+   紧接着 "The GPU process has crashed 1 time(s)"）。
+   → 照 138 补上 Destroy() 清理与 IsEmulatedFramebufferBound() 的判空。
+
+验证（Flash 29.0.0.171 / Chromium 140）：
+- Stage3DDrawTri（真 Program3D + drawTriangles 每帧循环）：DoSwapBuffers 336 次、
+  ENTER_FRAME 循环成立（"5 frames drawn"）、解码器出现
+  BindFramebuffer(fb=1) → DrawElements(draw_fb=3) → BindFramebuffer(fb=0)，
+  截图整屏红色三角形 ✔
+- Stage3DVisual（只 clear 红）：整屏红 ✔
+- 2D 回归：FlxInvaders interactive=3（digests eb1385667005/6fda809f6a7d/97b90b4a68ab）、
+  Canabalt interactive=3（1443341587cb/42c43866a601/fea605c67aad），无 CHECK/FATAL
+---
+ .../renderer/pepper/ppb_graphics_3d_impl.cc   | 25 +++++++++++++++++++
+ .../renderer/pepper/ppb_graphics_3d_impl.h    |  7 ++++++
+ .../service/gles2_cmd_decoder_passthrough.cc  | 10 +++++++-
+ 3 files changed, 41 insertions(+), 1 deletion(-)
+
+diff --git a/content/renderer/pepper/ppb_graphics_3d_impl.cc b/content/renderer/pepper/ppb_graphics_3d_impl.cc
+index e3e73ff281964..279bffe76256d 100644
+--- a/content/renderer/pepper/ppb_graphics_3d_impl.cc
++++ b/content/renderer/pepper/ppb_graphics_3d_impl.cc
+@@ -27,7 +27,9 @@
+ #include "content/renderer/pepper/host_globals.h"
+ #include "content/renderer/pepper/pepper_plugin_instance_impl.h"
+ #include "content/renderer/pepper/plugin_module.h"
++#include "content/renderer/render_frame_impl.h"
+ #include "content/renderer/render_thread_impl.h"
++#include "third_party/blink/public/web/web_frame_widget.h"
+ #include "gpu/GLES2/gl2extchromium.h"
+ #include "gpu/command_buffer/client/client_shared_image.h"
+ #include "gpu/command_buffer/common/context_creation_attribs.h"
+@@ -285,6 +287,28 @@ bool PPB_Graphics3D_Impl::BindToInstance(bool bind) {
+ 
+ bool PPB_Graphics3D_Impl::IsOpaque() { return !has_alpha_; }
+ 
++// PPAPI revival: see header. Requests a visual-state callback so the 3D
++// SwapBuffersACK is sent only after the frame has been presented.
++void PPB_Graphics3D_Impl::RequestSwapAckAfterPresentation() {
++  PepperPluginInstanceImpl* instance =
++      HostGlobals::Get()->GetInstance(pp_instance());
++  blink::WebFrameWidget* widget = nullptr;
++  blink::WebLocalFrame* frame = nullptr;
++  if (instance && instance->render_frame()) {
++    frame = instance->render_frame()->GetWebFrame();
++  }
++  if (frame) {
++    widget = frame->LocalRoot()->FrameWidget();
++  }
++  if (widget &&
++      widget->InsertVisualStateRequest(base::BindOnce(
++          &PPB_Graphics3D_Impl::ViewInitiatedPaint,
++          weak_ptr_factory_.GetWeakPtr()))) {
++    return;
++  }
++  ViewInitiatedPaint();
++}
++
+ void PPB_Graphics3D_Impl::ViewInitiatedPaint() {
+   commit_pending_ = false;
+ 
+@@ -531,6 +555,7 @@ int32_t PPB_Graphics3D_Impl::DoSwapBuffers(const gpu::SyncToken& sync_token,
+     HostGlobals::Get()
+         ->GetInstance(pp_instance())
+         ->CommitTransferableResource(resource);
++    RequestSwapAckAfterPresentation();
+     commit_pending_ = true;
+ 
+     if (!is_single_buffered_) {
+diff --git a/content/renderer/pepper/ppb_graphics_3d_impl.h b/content/renderer/pepper/ppb_graphics_3d_impl.h
+index 4da2f8f15e378..cf93ac70187f0 100644
+--- a/content/renderer/pepper/ppb_graphics_3d_impl.h
++++ b/content/renderer/pepper/ppb_graphics_3d_impl.h
+@@ -73,6 +73,13 @@ class PPB_Graphics3D_Impl : public ppapi::PPB_Graphics3D_Shared,
+   // These messages are used to send Flush callbacks to the plugin.
+   void ViewInitiatedPaint();
+ 
++  // PPAPI revival: Chromium 140 dropped
++  // WebLocalFrameClient::DidCommitAndDrawCompositorFrame, which used to
++  // drive ViewInitiatedPaint() (and therefore the 3D SwapBuffersACK).
++  // Ask for a visual-state callback instead, so the ACK is sent after the
++  // frame is actually presented.
++  void RequestSwapAckAfterPresentation();
++
+   gpu::CommandBufferProxyImpl* GetCommandBufferProxy();
+ 
+  protected:
+diff --git a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+index 6c63b653c976e..c720c95e1e5f9 100644
+--- a/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
++++ b/gpu/command_buffer/service/gles2_cmd_decoder_passthrough.cc
+@@ -1184,6 +1184,14 @@ void GLES2DecoderPassthroughImpl::Destroy(bool have_context) {
+     emulated_back_buffer_.reset();
+   }
+ 
++  // PPAPI revival: GLES2ExternalFramebuffer must be destroyed explicitly, its
++  // destructor DCHECKs that Destroy() already ran (Chromium 138 did this; the
++  // 140 port lost it together with the class itself).
++  if (external_default_framebuffer_) {
++    external_default_framebuffer_->Destroy(have_context);
++    external_default_framebuffer_.reset();
++  }
++
+   if (gpu_fence_manager_.get()) {
+     gpu_fence_manager_->Destroy(have_context);
+     gpu_fence_manager_.reset();
+@@ -2730,7 +2738,7 @@ void GLES2DecoderPassthroughImpl::VerifyServiceTextureObjectsExist() {
+ 
+ bool GLES2DecoderPassthroughImpl::IsEmulatedFramebufferBound(
+     GLenum target) const {
+-  if (!emulated_back_buffer_) {
++  if (!emulated_back_buffer_ && !external_default_framebuffer_) {
+     return false;
+   }
+ 
+-- 
+2.55.0.windows.2
+
+
+From b04ebf8fc2512d9319a023678853d6fb4db97339 Mon Sep 17 00:00:00 2001
+From: Sutanm <954708543@qq.com>
+Date: Wed, 18 Nov 2026 20:00:11 +0800
+Subject: [PATCH 11/11] =?UTF-8?q?feat(pepper):=20Flash=20preferences=20?=
+ =?UTF-8?q?=E4=B8=8E=2087=20=E5=AE=8C=E5=85=A8=E5=AF=B9=E9=BD=90=EF=BC=882?=
+ =?UTF-8?q?D=20=E4=B9=9F=E8=B5=B0=20GPU=EF=BC=89?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Chromium 87 里 is_3d_supported / is_stage3d_supported / is_stage3d_baseline_supported
+三者同源（来自 WebPreferences::flash_3d_enabled / flash_stage3d_enabled /
+flash_stage3d_baseline_enabled），Flash 的 2D 与 Stage3D 都走 GPU。
+
+早期我们只放开 Stage3D、把 is_3d_supported 留成 false，是因为“2D-GPU 白屏”。
+现在查明那个白屏与 2D 无关，根因是同一个：
+  - 3D SwapBuffersACK 断流（提交 738b0b15e79c5 已修）
+  - ~GLES2ExternalFramebuffer 的 DCHECK 导致 GPU 进程崩溃（同一提交已修）
+两处修好后，2D-GPU 路径正常，因此把 is_3d_supported 也打开，与 87 一致。
+
+验证：
+- FlxInvaders：interactive=3，digests f4b279d203e9/d0f24c0de8ac/7aee29229cef，画面正常（截图 8.7KB）
+- Canabalt：interactive=3，digests 843ba05b1b26/c693957dd278/fea605c67aad，正常（6.1KB）
+- Stage3D：DoSwapBuffers 217 次、红三角正常、无 CHECK/FATAL
+---
+ content/renderer/pepper/ppapi_preferences_builder.cc | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+diff --git a/content/renderer/pepper/ppapi_preferences_builder.cc b/content/renderer/pepper/ppapi_preferences_builder.cc
+index 7894f169ded2e..ca67bbacc30db 100644
+--- a/content/renderer/pepper/ppapi_preferences_builder.cc
++++ b/content/renderer/pepper/ppapi_preferences_builder.cc
+@@ -38,10 +38,13 @@ ppapi::Preferences PpapiPreferencesBuilder::Build(
+   const bool gpu_accelerated =
+       gpu_feature_info.status_values[gpu::GPU_FEATURE_TYPE_ACCELERATED_GL] ==
+       gpu::kGpuFeatureStatusEnabled;
+-  // Only advertise Stage3D; is_3d_supported also switches Flash's *2D*
+-  // renderer to the GPU path, which currently composites as a blank (white)
+-  // layer in this port, so keep 2D on the proven software path for now.
+-  ppapi_prefs.is_3d_supported = false;
++  // 与 Chromium 87 的取值一致（flash_3d_enabled / flash_stage3d_enabled /
++  // flash_stage3d_baseline_enabled 三者同源）：Flash 的 2D 与 Stage3D 都走 GPU。
++  // 早期版本这里只放开 Stage3D，是因为 2D-GPU 会白屏；白屏的真正原因是
++  // 3D SwapBuffersACK 断流 + GPU 进程崩溃（见 ppb_graphics_3d_impl.cc 的
++  // RequestSwapAckAfterPresentation 与 gles2_cmd_decoder_passthrough.cc 的
++  // external framebuffer 销毁修复），两处修好后 2D-GPU 也正常。
++  ppapi_prefs.is_3d_supported = gpu_accelerated;
+   ppapi_prefs.is_stage3d_supported = gpu_accelerated;
+   ppapi_prefs.is_stage3d_baseline_supported = gpu_accelerated;
+   ppapi_prefs.is_accelerated_video_decode_enabled =
 -- 
 2.55.0.windows.2
 

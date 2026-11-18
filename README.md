@@ -18,16 +18,24 @@ Chromium 在 **138 是最后一个带原生 PPAPI 的版本**，140 把 `ppapi/`
 
 | 内容 | 说明 |
 | --- | --- |
-| `patches/140-port.patch` | Chromium 140 / Electron 38 的完整移植补丁（1782 文件 / 286 853 行新增） |
+| `patches/140-port.patch` | Chromium 140 / Electron 38 的完整移植补丁（11 个提交 / 1815 文件 / 289 107 行新增） |
 | `patches/138-port.patch` | Chromium 138 / Electron 37 基线补丁（83 文件） |
 | `manifests/` | 变更清单（name-status / numstat）与 13 个关键文件 SHA-256 |
 | `scripts/restore-140.ps1` | 从干净 Chromium 140 树 + 补丁恢复出可编译工作树 |
 | `scripts/verify-140.ps1` | 校验恢复结果（哈希 / 目录规模 / 关键符号） |
 
-> **2026-11-18 更新**：`patches/140-port.patch` 已包含**方案 A**（FlushAck 改为"帧呈现后"发送）：
+> **2026-11-18 更新（方案 A）**：`patches/140-port.patch` 已包含**方案 A**（FlushAck 改为"帧呈现后"发送）：
 > `pepper_graphics_2d_host` 用 `WebFrameWidget::InsertVisualStateRequest()` 在呈现后回 ack，
 > 浏览器侧 `RenderFrameHostImplPpapiSupport` 负责懒绑定 `WidgetCompositor`。
 > 对应提交 `a54a191522a6e`，文档见 `docs/forward-version-feasibility.md` §1.14.12。
+>
+> **2026-11-18 更新（Stage3D 打通）**：`patches/140-port.patch` 现在包含 **11 个提交**，
+> 覆盖 Flash 私有 API（`PPB_Flash_File` / `PPB_Flash_Fullscreen` / `PPB_Flash` 单例 /
+> `PPB_Flash_FontFile` / 浏览器侧 Flash host）与 **Stage3D 硬件加速**的完整修复链：
+> preferences 硬编码 `false` → 插件侧 GLES2 `bind_generates_resource` 失配 →
+> `glSwapBuffers` 命令链缺失 → 3D `SwapBuffersACK` 断流 + GPU 进程崩溃。
+> 实测与 Chromium 87（本体项目）**功能与帧率完全对等**（driver=OpenGL、150 帧 6.2s、整屏红三角）。
+> 全过程与逐条证据见 `docs/140-experiments.md`。
 | `docs/140-ppapi-revival-ai-guide.md` | **面向 AI 的 140 二次实现说明书**（16 阶段 + 25 条错误字典 + harness） |
 | `docs/forward-version-feasibility.md` | 138→140/142/144/150 可行性实测与完整历程（§1.14.11 = 最终状态） |
 | `docs/preservation-plan.md` | 代码保存方案（本地快照 / 补丁归档 / 远程 fork / 冷备） |
