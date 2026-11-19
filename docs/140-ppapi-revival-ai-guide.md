@@ -485,8 +485,8 @@ set E19_MODE=control
 | 🚫 上游从未实现 | `PPB_Flash_Print` | 76 里就是 0 命中 | 跳过 |
 | 🚫 上游从未实现 | `PPP_Flash_BrowserOperations` | 76 里就是 0 命中 | 跳过 |
 | 🚫 Flash 废弃 | `PPB_Flash_Menu` | 76~87 有，90 删除；Flash 29 不调也不自绘 | 见 §18.1 |
-| ⏳ 真缺口 | `PPB_Flash_DRM` | 76 的 `chrome/browser` + `chrome/renderer` 各有实现 | 待做 |
-| ⏳ 待确认 | `PPB_Flash_MessageLoop` | 76 的 `content/renderer/resource_creation_impl` 有引用 | 待查 |
+| ⏸️ 真缺口但不可验证 | `PPB_Flash_DRM` | 76 两侧都有；AS3 层不可达（见 §14.2.1） | 暂缓 |
+| 🚫 从未实现 | `PPB_Flash_MessageLoop`(OOP) | 76/140 的 browser 侧都没接（只有 NaCl 的 in-process 路径） | 跳过 |
 
 ### 14.2.1 `PPB_Flash_DRM`（下一个候选）
 
@@ -505,6 +505,25 @@ Electron 没有这套 prefs 体系。
 `GetHmonitor` 用 Win32 `MonitorFromWindow`；`MonitorIsExternal` 返回 `PP_FALSE`。
 
 **但优先级低**：只有 DRM 保护内容（加密 H.264/AAC）才触发，4399 小游戏等场景不会调。
+
+#### 探针实测（2026-11-19）：无法从 AS3 触达
+
+| 检查 | 结果 |
+| --- | --- |
+| `playerglobal.swc` 的 `library.swf` 搜 DRM | **0 命中**（SDK 无声明；`import` 能过是因为 AS3 import 不校验存在性） |
+| 运行时 `getDefinitionByName("flash.net.drm.DRMManager")` | ✅ **FOUND** |
+| `describeType()` 枚举方法 | 15 个：`authenticate` / `loadVoucher` / `storeVoucher` / `resetDRMVouchers` / `addToDeviceGroup` / … |
+| 是否有 `getDeviceID` | ❌ 没有（它在 `DRMDeviceID` 上，该类型反射 MISSING） |
+| `resetDRMVouchers()` | ✅ 成功，但 **DRM 探针 0 次** |
+| `loadVoucher(null, cb)` | ❌ `EXC 0`（缺 `DRMContentData`） |
+| `authenticate(null, cb)` | ❌ `EXC 1063`（缺 `DRMAuthenticationContext`） |
+
+**结论**：`PPB_Flash_DRM::GetDeviceID` 是 Flash **内部**在 `loadVoucher`/`storeVoucher`
+时调的，不暴露给 AS3。没有真实 DRM 内容就无法验证。
+
+`tests/flash-probes/DrmProbe.as` 已入库 —— 将来拿到 DRM 内容可直接复用它验证。
+
+**处置：暂缓**（~250 行 + `DeviceIDFetcher` 需去掉 Chrome PrefService 依赖）。
 
 ### 14.3 纯配置层（最后做）
 
