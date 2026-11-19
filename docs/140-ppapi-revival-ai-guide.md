@@ -475,7 +475,7 @@ set E19_MODE=control
 | 优先级 | 项 | 140 的删除 / 现状 | 影响 | 建议做法 |
 | --- | --- | --- | --- | --- |
 | ~~P1~~ | ~~`PPB_Flash_Clipboard`~~ | ✅ **已实现**（`pepper_flash_clipboard_host.{h,cc}`，提交 `7f61340`） | 复制/粘贴、`System.setClipboard` 可用 | 见 §17.5 |
-| **P2** | `PPB_Flash_Menu` | 无宿主 | AS3 自定义 `ContextMenu` 不弹（默认右键菜单不受影响） | 补 host + `PepperFlashMenuMessageFilter`，用 140 的 `views::MenuRunner` 或自绘 |
+| 🚫 | ~~`PPB_Flash_Menu`~~ | **死接口**：87/138/140 三版本均无宿主，且 Flash 从不调用（自己绘制菜单） | AS3 自定义 `ContextMenu` 由 Flash 自绘，与宿主无关 | **不做**（见 §18） |
 | **P2** | `PPB_Flash_DRM` | 无宿主 | 受保护视频（Netflix 类） | 只需实现 `GetDeviceID` 的非 DRM 部分即可让 Flash 不报错 |
 | **P2** | `PPB_Flash_MessageLoop` | 只有 plugin 侧 proxy，无 host | 极少数老内容用嵌套消息循环，可能卡住 | 参考 87 的 `ppb_flash_message_loop_impl` |
 | **P2** | `PPP_Flash_BrowserOperations` | 只有头文件 | 浏览器→插件的设置/白名单下发 | 低优先：Flash 自管设置已够用 |
@@ -682,3 +682,46 @@ content/renderer/pepper/pepper_url_loader_host.cc    web_request.SetSkipOrb(true
 
 工程备注：改公共 mojom 会触发约 2000 步重建（content + network + blink platform）。
 32 核 / 31.8GB 上 `-j 8` 实测可用内存最低 9GB，约 50 分钟，0 错误。
+
+---
+
+## 18. 死接口清单（实现前先看这里）
+
+有些 "缺口" 其实是**上游从未实现的接口**，不是 140 的回归。实现之前必须先确认。
+
+### 18.1 `PPB_Flash_Menu`（已确认死接口）
+
+| 检查 | 结果 |
+| --- | --- |
+| Chromium 87 / 138 / 140 的 `content/**` 里 `PpapiHostMsg_FlashMenu` | 全部 **0 命中** |
+| C87（官方 Electron 11）上跑 `MenuProbe.swf` | 无 `CONTEXT_MENU` 事件、无 `FlashMenu` IPC |
+| 140 上同样探针 | 同上 |
+
+结论：Flash **自己绘制**右键菜单，不走 `PPB_Flash_Menu`。AS3 `ContextMenu.customItems`
+由 Flash 自绘，与宿主无关。
+
+**本手册曾实现过完整宿主**（`views::MenuRunner` + 递归 `SimpleMenuModel` + 异步应答，
+~450 行），因为**没有调用方**而全部回滚。顺带确认的三件事仍有参考价值：
+
+- `content/browser` 可以依赖 `//ui/views`（编译 + 链接通过）
+- `content/browser` 里 `TOOLKIT_VIEWS` 条件编译 **0 处**，crbug.com/1218907 的隐患不存在
+- `electron/BUILD.gn:516` 已依赖 views，**体积不增加**
+
+### 18.2 判断流程（务必遵守）
+
+```
+发现某个 PPAPI 接口"缺宿主"
+  → 先在 C87/138 树里 grep content/** 是否有宿主
+  → 再在 C87 上跑最小探针，看它是否真的工作
+  → 如果 C87 也不行 → 这是"上游从未实现"，不是回归
+  → 优先级重估（通常应降到最低或不做）
+```
+
+反例成本：本手册为 `PPB_Flash_Menu` 花了 ~1 小时实现 + 2 次全量重编，
+最后全部回滚。
+
+### 18.3 对照：确实是真缺口的（已修复）
+
+| 接口 | 证据 | 提交 |
+| --- | --- | --- |
+| `PPB_Flash_Clipboard` | C87 上点击后 `setClipboard ok`，但系统剪贴板未变 | `7f61340`（§17.5） |
