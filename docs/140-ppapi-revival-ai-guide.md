@@ -470,20 +470,39 @@ set E19_MODE=control
 | 4 个策略钩子 | ✅ 已改为 true（比 138 更完整） |
 | `PPB_WebSocket` | ✅ 文件齐（`websocket_resource.cc` + `pepper_websocket_host.cc`）；Flash 29 的 AS3 无 WebSocket API，实际用不到 |
 
-### 14.2 待补的代码层缺口
+#### 14.2 剩余缺口（2026-11-19 二次考古后）
 
-| 优先级 | 项 | 140 的删除 / 现状 | 影响 | 建议做法 |
-| --- | --- | --- | --- | --- |
-| ~~P1~~ | ~~`PPB_Flash_Clipboard`~~ | ✅ **已实现**（`pepper_flash_clipboard_host.{h,cc}`，提交 `7f61340`） | 复制/粘贴、`System.setClipboard` 可用 | 见 §17.5 |
-| 🚫 | ~~`PPB_Flash_Menu`~~ | **Flash 侧已废弃**：76~87 的 `chrome/renderer` 有实现，90 删除；Flash 29 收到 `CONTEXTMENU` 后既不调 `Show()` 也不自绘 | AS3 自定义 `ContextMenu` 无 UI | **不做**（见 §18.1） |
-| **P2** | `PPB_Flash_DRM` | 无宿主 | 受保护视频（Netflix 类） | 只需实现 `GetDeviceID` 的非 DRM 部分即可让 Flash 不报错 |
-| **P2** | `PPB_Flash_MessageLoop` | 只有 plugin 侧 proxy，无 host | 极少数老内容用嵌套消息循环，可能卡住 | 参考 87 的 `ppb_flash_message_loop_impl` |
-| **P2** | `PPP_Flash_BrowserOperations` | 只有头文件 | 浏览器→插件的设置/白名单下发 | 低优先：Flash 自管设置已够用 |
-| **P3** | `PPB_Flash_Print` | 无宿主（`InvokePrinting` 返回 OK 但不打印） | 打印 | 低优先 |
-| **P3** | `PPB_Flash::DrawGlyphs` | 无实现 | 个别字体/抗锯齿路径；常规文字已实测正常 | 低优先 |
-| **P3** | `PPB_Flash::GetProxyForURL` | 返回 `PP_ERROR_FAILED` | 仅 Flash 自建 socket 的罕见场景 | 低优先 |
-| **P3** | 视频帧拷贝 | `video_decoder_shim.cc` 跳过 `CopyVideoFrameToSharedImage`（140 改收 `ClientSharedImage`） | **部分视频可能黑屏**（加速解码路径正常，未系统验证） | 让 shim 持有 `ClientSharedImage` 并用 `VideoFrame` 作源；或先做一次视频回归确认影响面 |
-| **P3** | `CancelCompositionForPepper` | no-op（Blink 删除） | IME 组合态 | 低优先 |
+**批量考古结论**：把每个候选在 76/87/140 的 `content/**` + `chrome/**` 里都查一遍，
+分成三类，只做"接口活着 + 上游曾有实现"的那一类。
+
+| 分类 | 接口 | 依据 | 处置 |
+| --- | --- | --- | --- |
+| ✅ 已修 | `PPB_Flash_Clipboard` | C87 上也不工作，plugin 侧在 | `7f61340` |
+| ✅ 已修 | `PPB_Flash::DrawGlyphs` | 76/87 有，140 无；plugin 侧调用路径完整 | `882f742` |
+| 🚫 接口消失 | `PPB_Flash_UMA` | 140 里连 `ppb_flash_uma.h` 都没了 | 跳过 |
+| 🚫 上游从未实现 | `PPB_Flash_Print` | 76 里就是 0 命中 | 跳过 |
+| 🚫 上游从未实现 | `PPP_Flash_BrowserOperations` | 76 里就是 0 命中 | 跳过 |
+| 🚫 Flash 废弃 | `PPB_Flash_Menu` | 76~87 有，90 删除；Flash 29 不调也不自绘 | 见 §18.1 |
+| ⏳ 真缺口 | `PPB_Flash_DRM` | 76 的 `chrome/browser` + `chrome/renderer` 各有实现 | 待做 |
+| ⏳ 待确认 | `PPB_Flash_MessageLoop` | 76 的 `content/renderer/resource_creation_impl` 有引用 | 待查 |
+
+### 14.2.1 `PPB_Flash_DRM`（下一个候选）
+
+76 的三块实现：
+
+| 文件 | 大小 | 职责 |
+| --- | --- | --- |
+| `chrome/browser/.../pepper_flash_drm_host.{h,cc}` | ~8.7K | `GetDeviceID` / `GetHmonitor` / `MonitorIsExternal` |
+| `chrome/browser/.../device_id_fetcher.{h,cc}` | ~9.6K | 基于 machine id + DRM salt 算设备 ID |
+| `chrome/renderer/.../pepper_flash_drm_renderer_host.{h,cc}` | ~5K | renderer 侧 |
+
+**移植难点**：`DeviceIDFetcher` 依赖 Chrome 的 `PrefService`（`kEnableDRM` / `kDRMSalt`），
+Electron 没有这套 prefs 体系。
+
+**简化方案**：`GetDeviceID` 返回基于 machine id 的稳定字符串（不需要 prefs）；
+`GetHmonitor` 用 Win32 `MonitorFromWindow`；`MonitorIsExternal` 返回 `PP_FALSE`。
+
+**但优先级低**：只有 DRM 保护内容（加密 H.264/AAC）才触发，4399 小游戏等场景不会调。
 
 ### 14.3 纯配置层（最后做）
 
