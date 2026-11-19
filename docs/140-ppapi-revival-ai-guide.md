@@ -2,6 +2,9 @@
 
 > **目标读者**：另一个 AI 代理（或工程师），要从 138 的 PPAPI 代码出发，在 **Chromium 140 + Electron v38** 上把原生 Flash 重新跑起来，并输出一帧真实 SWF 画面。
 > **本文性质**：可执行 runbook + 逐文件清单 + 错误字典。**每一步都有判定标准**；未通过不要进下一步。
+
+> **进度基线（2026-11-19）**：阶段 A–J 全部通过；2D / Stage3D / 输入 / LSO / 全屏 / 脚本桥 /
+> Socket / 跨域配置均已在真实站点验证。**剩余缺口只看 §14**（代码层优先，版本号这种纯配置项排最后）。
 > **实测状态（2026-11-17）**：✅ 已完成。Flash 29.0.0.171 在 Chromium 140 上完整渲染 `FlxInvaders.swf`（`interactiveFrames=3`，画面为真实游戏）。
 > 背景：[`2026-11-15-forward-version-feasibility.md`](2026-11-15-forward-version-feasibility.md)（可行性/历程）、[`2026-11-14-flash-port-ai-runbook.md`](2026-11-14-flash-port-ai-runbook.md)（138 版手册）。
 
@@ -448,16 +451,51 @@ set E19_MODE=control
 
 ---
 
-## 14. 已知功能债（不影响 2D Flash 出帧）
+## 14. 缺口清单（2026-11-19 更新；按"代码层优先"排序）
 
-| 项 | 140 的删除 | 当前处理 | 建议 |
-| --- | --- | --- | --- |
-| Stage3D 默认帧缓冲 | `CommandBufferProxyImpl::SetDefaultFramebufferSharedImage` | `Attach/Detach` no-op | 用 140 的 `SharedImageInterface` 重写绑定 |
-| 视频帧拷贝 | `CopyVideoFrameToSharedImage` 改收 `ClientSharedImage` | 跳过拷贝 | 让 shim 持有 `ClientSharedImage` 并用 `VideoFrame` 作为源 |
-| `PPB_WebSocket` | Blink `WebPepperSocket` 删除 | 桩（Connect 直接失败） | 用 `network::mojom::WebSocket` 自建，或移植 138 的 blink 实现 |
-| `PPB_BrowserFont_Trusted` | Blink `WebFont` 删除 | **已用 138 原生 `web_font.cc` 恢复**（真实度量+绘制） | — |
-| `CancelCompositionForPepper` | Blink 删除 | no-op | 低优先级（仅影响 IME） |
-| 4 个策略钩子 | 基类默认 false（138 也是 false） | 已改为 true | 比 138 更完整 |
+> 排序原则：**代码层能力优先，纯配置层最后**。先前把"版本门槛"列为 P1，
+> 现已降级为最后（它只是插件注册串/UA 里的版本号，不涉及任何代码逻辑）。
+
+### 14.1 已具备（实测通过，勿再当缺口）
+
+| 能力 | 状态 |
+| --- | --- |
+| 2D 渲染 / 输入（键盘+鼠标）/ LSO / 全屏 / `navigateToURL` / 嵌入字体 | ✅ |
+| Stage3D 硬件加速 | ✅ **已修复**：`SetDefaultFramebufferSharedImage` 全链路 + 3D `SwapBuffersACK` + `glSwapBuffers` 命令链（与 87 效果/帧率对等） |
+| JS ↔ Flash 脚本桥（`GetVariable`/`checkflash`/`ExternalInterface`） | ✅ §17.2 |
+| `navigator.plugins` / `mimeTypes` 暴露真实插件 | ✅ §17.1 |
+| Socket / XMLSocket（联网游戏登录） | ✅ §17.3 |
+| 插件跨域配置加载（ORB 请求级豁免） | ✅ §17.4 |
+| `PPB_BrowserFont_Trusted` | ✅ 用 138 原生 `web_font.cc` 恢复（真实度量+绘制） |
+| 4 个策略钩子 | ✅ 已改为 true（比 138 更完整） |
+| `PPB_WebSocket` | ✅ 文件齐（`websocket_resource.cc` + `pepper_websocket_host.cc`）；Flash 29 的 AS3 无 WebSocket API，实际用不到 |
+
+### 14.2 待补的代码层缺口
+
+| 优先级 | 项 | 140 的删除 / 现状 | 影响 | 建议做法 |
+| --- | --- | --- | --- | --- |
+| **P1** | `PPB_Flash_Clipboard` | 无宿主（`pepper_flash_clipboard_*` 全缺） | 复制/粘贴、`System.setClipboard` 无效 | 补 browser 侧 message filter；140 的 `ui::Clipboard` 读取已异步化，需要把 `GetSequenceNumber`/`ReadText` 改成回调式应答 |
+| **P2** | `PPB_Flash_Menu` | 无宿主 | AS3 自定义 `ContextMenu` 不弹（默认右键菜单不受影响） | 补 host + `PepperFlashMenuMessageFilter`，用 140 的 `views::MenuRunner` 或自绘 |
+| **P2** | `PPB_Flash_DRM` | 无宿主 | 受保护视频（Netflix 类） | 只需实现 `GetDeviceID` 的非 DRM 部分即可让 Flash 不报错 |
+| **P2** | `PPB_Flash_MessageLoop` | 只有 plugin 侧 proxy，无 host | 极少数老内容用嵌套消息循环，可能卡住 | 参考 87 的 `ppb_flash_message_loop_impl` |
+| **P2** | `PPP_Flash_BrowserOperations` | 只有头文件 | 浏览器→插件的设置/白名单下发 | 低优先：Flash 自管设置已够用 |
+| **P3** | `PPB_Flash_Print` | 无宿主（`InvokePrinting` 返回 OK 但不打印） | 打印 | 低优先 |
+| **P3** | `PPB_Flash::DrawGlyphs` | 无实现 | 个别字体/抗锯齿路径；常规文字已实测正常 | 低优先 |
+| **P3** | `PPB_Flash::GetProxyForURL` | 返回 `PP_ERROR_FAILED` | 仅 Flash 自建 socket 的罕见场景 | 低优先 |
+| **P3** | 视频帧拷贝 | `video_decoder_shim.cc` 跳过 `CopyVideoFrameToSharedImage`（140 改收 `ClientSharedImage`） | **部分视频可能黑屏**（加速解码路径正常，未系统验证） | 让 shim 持有 `ClientSharedImage` 并用 `VideoFrame` 作源；或先做一次视频回归确认影响面 |
+| **P3** | `CancelCompositionForPepper` | no-op（Blink 删除） | IME 组合态 | 低优先 |
+
+### 14.3 纯配置层（最后做）
+
+| 项 | 说明 |
+| --- | --- |
+| 对外宣称版本 | 当前 `Shockwave Flash 29.0 r0`；要求 ≥32/34 的站点会提示"请升级"。只需改注册串/UA 里的版本号（主项目用"广告版本 ≠ 物理版本"的做法），**不涉及代码逻辑**，排最后 |
+
+### 14.4 机制差异（非缺失，已验证等价）
+
+| 项 | 说明 |
+| --- | --- |
+| `PPB_Graphics3D` front buffer | 87 用 `TakeFrontBuffer` 邮箱 + back→front 拷贝；本项目用 FB 0 直绑共享图像 + swap 命令（no-op）。实测效果/帧率与 87 一致 |
 
 ---
 
@@ -500,6 +538,9 @@ cmd /c D:\electron-build\run-flash-140.cmd
 - [ ] §12 harness 跑通：`pepperProcess=true`、`initialize_module returned 0`
 - [ ] §12 出帧：`interactiveFrames>=2` 且截图是真实 SWF
 - [ ] 用 **Flash 29.0.0.171** 验证（34 魔改版有 EOL 时间炸弹）
+- [ ] §17 站点兼容四条：`navigator.plugins` 有 Flash / `el.GetVariable` 是 function /
+      `SocketProbe` 能连上本地端口 / 插件跨域 `.xml` 返回 200（页面侧仍被 ORB 拦）
+- [ ] 真实站点验收：4399 或 7k7k 的联网 AS3 游戏能登录并进入关卡
 
 ---
 
