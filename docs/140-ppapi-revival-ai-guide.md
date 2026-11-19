@@ -474,7 +474,7 @@ set E19_MODE=control
 
 | 优先级 | 项 | 140 的删除 / 现状 | 影响 | 建议做法 |
 | --- | --- | --- | --- | --- |
-| **P1** | `PPB_Flash_Clipboard` | 无宿主（`pepper_flash_clipboard_*` 全缺） | 复制/粘贴、`System.setClipboard` 无效 | 补 browser 侧 message filter；140 的 `ui::Clipboard` 读取已异步化，需要把 `GetSequenceNumber`/`ReadText` 改成回调式应答 |
+| ~~P1~~ | ~~`PPB_Flash_Clipboard`~~ | ✅ **已实现**（`pepper_flash_clipboard_host.{h,cc}`，提交 `7f61340`） | 复制/粘贴、`System.setClipboard` 可用 | 见 §17.5 |
 | **P2** | `PPB_Flash_Menu` | 无宿主 | AS3 自定义 `ContextMenu` 不弹（默认右键菜单不受影响） | 补 host + `PepperFlashMenuMessageFilter`，用 140 的 `views::MenuRunner` 或自绘 |
 | **P2** | `PPB_Flash_DRM` | 无宿主 | 受保护视频（Netflix 类） | 只需实现 `GetDeviceID` 的非 DRM 部分即可让 Flash 不报错 |
 | **P2** | `PPB_Flash_MessageLoop` | 只有 plugin 侧 proxy，无 host | 极少数老内容用嵌套消息循环，可能卡住 | 参考 87 的 `ppb_flash_message_loop_impl` |
@@ -608,6 +608,39 @@ RenderFrameImpl::pepper_routing_id_ 默认 -1，且从未赋值（140 删 PPAPI 
 打 `message.type()`、`PepperTCPSocketMessageFilter` 构造打 `render_process_id_/render_frame_id_`、
 `GetNetworkContext()` 打 rph 是否为空；再用 `InterfaceList::GetInterfaceForPPB` 打
 `registered=/perm_ok=/perm_bits=` 排除权限问题（命令行注册的插件本就是 255 全权限，别往这条上猜）。
+
+### 17.5 剪贴板写入"成功"但系统剪贴板没变（错误字典 #30）
+
+现象：AS3 `System.setClipboard("x")` 返回成功（有用户手势时），但系统剪贴板内容不变；
+`System.getClipboard()` 永远拿到空。
+
+判定（关键：必须区分"无手势拒绝"和"宿主缺失"）：
+
+```as
+// 先自动调一次（预期 #2176），再在 CLICK 里调一次
+AUTO  setClipboard EXC 2176   ← 无手势 → Flash 自己抛 SecurityError，属正常策略
+CLICK setClipboard ok          ← 有手势 → 到达宿主；此时若剪贴板仍未变 = 宿主缺失
+```
+
+根因：Chromium 138/140 **只有 plugin 侧**（`ppapi/proxy/flash_clipboard_resource.cc`），
+浏览器侧从来没有宿主。而 `WriteData` 是异步 `Post`，plugin 侧注释明写
+"Assume success, since it allows us to avoid a sync IPC" —— 于是静默失败。
+
+排除项（别浪费时间）：
+- 不是 `mms.cfg` 的 `AllowClipboardAccess`（加了无效）
+- 不是 140 的回归（**官方 Electron 11 / Chromium 87 行为完全一致**）
+
+修法：新增 `content/browser/renderer_host/pepper/pepper_flash_clipboard_host.{h,cc}`，
+在 `ContentBrowserPepperHostFactory` 注册 `PpapiHostMsg_FlashClipboard_Create`。
+
+| 消息 | 要点 |
+| --- | --- |
+| `ReadData` | `ui::Clipboard` 读取在 140 是异步的 → `MakeReplyMessageContext()` + `PP_OK_COMPLETIONPENDING` + 回调里 `SendReply`（照 `PepperTCPSocketMessageFilter`） |
+| `WriteData` | `ui::Clipboard` 写 API 是 **protected**，必须用 `ui::ScopedClipboardWriter` |
+| `RegisterCustomFormat` | 稳定 hash 到 `0x10000+`，避开预定义格式 1..3 |
+| `GetSequenceNumber` | `ClipboardSequenceNumberToken` 是 `base::TokenType`（`ToString()` 可用，**没有** `high()/low()`/`data()`），折叠成 64 位即可 |
+
+验收：点击后 Windows 剪贴板从 `CLEARED_BEFORE_TEST` 变成 Flash 写入的值。
 
 ### 17.4 联网游戏卡在资源加载 / `ERR_BLOCKED_BY_ORB`（错误字典 #29）
 
