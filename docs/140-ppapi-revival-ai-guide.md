@@ -484,7 +484,7 @@ set E19_MODE=control
 | 🚫 接口消失 | `PPB_Flash_UMA` | 140 里连 `ppb_flash_uma.h` 都没了 | 跳过 |
 | 🚫 上游从未实现 | `PPB_Flash_Print` | 76 里就是 0 命中 | 跳过 |
 | 🚫 上游从未实现 | `PPP_Flash_BrowserOperations` | 76 里就是 0 命中 | 跳过 |
-| 🚫 Flash 废弃 | `PPB_Flash_Menu` | 76~87 有，90 删除；Flash 29 不调也不自绘 | 见 §18.1 |
+| ✅ 已修 | `PPB_Flash_Menu` | 76~87 有；SiteLock SWF 实测会调（`45f5bd2`） | 见 §18.1 |
 | ⏸️ 真缺口但不可验证 | `PPB_Flash_DRM` | 76 两侧都有；AS3 层不可达（见 §14.2.1） | 暂缓 |
 | 🚫 从未实现 | `PPB_Flash_MessageLoop`(OOP) | 76/140 的 browser 侧都没接（只有 NaCl 的 in-process 路径） | 跳过 |
 
@@ -729,38 +729,28 @@ content/renderer/pepper/pepper_url_loader_host.cc    web_request.SetSkipOrb(true
 
 有些 "缺口" 其实是**上游从未实现的接口**，不是 140 的回归。实现之前必须先确认。
 
-### 18.1 `PPB_Flash_Menu`（Flash 侧已废弃，非"从未实现"）
+### 18.1 `PPB_Flash_Menu`（**有真实调用方，已实现**）
 
-**重要更正**：早期结论是"上游从未实现"，这是**错的**。往前考古 76 后得到完整事实：
+> **这一节的结论改过两次，两个反面教材都值得记住。**
 
-| 版本 | `chrome/renderer/pepper/pepper_flash_menu_host.cc` |
-| --- | --- |
-| 76 / 80 / 85 | ✅ 存在 |
-| **87** | ✅ **存在**（与 76 只差 2 行：`ContextMenuParams` → `UntrustworthyContextMenuParams`） |
-| **90** | ❌ 删除（`81da804 [Flash] Remove some Flash APIs`） |
-| 138 / 140 | ❌ 不存在 |
+| 阶段 | 错误结论 | 错在哪 |
+| --- | --- | --- |
+| 一 | "上游从未实现" | 只 grep 了 `content/**`，漏掉 `chrome/**`（76~87 有实现） |
+| 二 | "Flash 29 废弃了，不调也不自绘" | 只用 AS3 `ContextMenu` 做探针，覆盖不到这条路径 |
+| **三（正确）** | **有真实调用方** | 用 SiteLock 加密 SWF 才触发 |
 
-**Electron 为何一直不工作**：该宿主在 `chrome/renderer/`，Electron 不编译 chrome 层。
-所以"C87 实测不工作"证明的是 **Electron 缺 chrome 层**，不是"上游没实现"。
+**决定性证据**：用 drmsoft.cn 的 SiteLock 加密 SWF
+（`/doc/swf_drm/swf_drm_demo.asp` → `Only_Play_DRMsoft.swf`）加载时：
 
-**移植后仍无效的原因**（逐层探针实测）：
+```
+[ppexp] resource host creation FAILED: type=264146 name=FlashMenu_Create
+[ppexp] resource host MISSING for message type=264150 name=FlashMenu_Show
+```
 
-| 层 | 结果 |
-| --- | --- |
-| Blink 派发 `contextmenu` | ✅ `dom_type=contextmenu web_type=5` |
-| `WebPluginContainerImpl` → `kContextMenu` | ✅ |
-| `PepperPluginInstanceImpl::HandleInputEvent` | ✅ `type=5` |
-| `ClassifyInputEvent` → `PP_INPUTEVENT_CLASS_MOUSE` | ✅ |
-| `ConvertEventTypes` → `PP_INPUTEVENT_TYPE_CONTEXTMENU` | ✅ |
-| **Flash 内部收到**（AS3 `CONTEXT_MENU` 回调触发） | ✅ |
-| **Flash 调 `PPB_Flash_Menu::Show()`** | ❌ **0 条 IPC** |
-| **菜单 UI** | ❌ 无 |
+**关键认知**：AS3 `ContextMenu` 由 Flash 自绘、**不走** `PPB_Flash_Menu`；
+但 **SiteLock / 加密包装的内容会走**。"探针不触发" ≠ "接口废弃"。
 
-**结论**：Flash 29 收到 `CONTEXTMENU` 后既不调 `Show()` 也不自绘菜单。这是 **Flash 自身行为变化**
-（76 时代会调），也解释了 Chromium 90 为何删掉该 API。Flash 的菜单绘制很可能依赖它自己创建
-popup 窗口的能力，在 PPAPI 无窗口模式下拿不到。
-
-**140 的移植路径**（若将来需要）：
+**实现**：`content/renderer/pepper/pepper_flash_menu_host.{h,cc}`（84 行，照抄 76）：
 
 | 76/87 | 140 |
 | --- | --- |
@@ -769,7 +759,8 @@ popup 窗口的能力，在 PPAPI 无窗口模式下拿不到。
 | `RenderFrame::ShowContextMenu` | `blink::WebLocalFrame::ShowContextMenuFromExternal` |
 | `content::ContextMenuClient` | `blink::mojom::ContextMenuClient`（`AssociatedReceiver`） |
 
-宿主应放在 `content/renderer/pepper/`（Electron 无 chrome 层）。
+**验证**：修复后 `[ppexp]` 真 Flash 消息未处理从 2 条 → **0 条**；
+但该 SWF 本身仍空白（SiteLock 的域名/路径/时间戳校验，与 Menu 无关）。
 
 ### 18.2 判断流程（务必遵守；本流程已因 §18.1 的误判修正过一次）
 
