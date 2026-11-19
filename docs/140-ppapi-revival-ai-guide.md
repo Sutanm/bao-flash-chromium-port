@@ -475,7 +475,7 @@ set E19_MODE=control
 | 优先级 | 项 | 140 的删除 / 现状 | 影响 | 建议做法 |
 | --- | --- | --- | --- | --- |
 | ~~P1~~ | ~~`PPB_Flash_Clipboard`~~ | ✅ **已实现**（`pepper_flash_clipboard_host.{h,cc}`，提交 `7f61340`） | 复制/粘贴、`System.setClipboard` 可用 | 见 §17.5 |
-| 🚫 | ~~`PPB_Flash_Menu`~~ | **死接口**：87/138/140 三版本均无宿主，且 Flash 从不调用（自己绘制菜单） | AS3 自定义 `ContextMenu` 由 Flash 自绘，与宿主无关 | **不做**（见 §18） |
+| 🚫 | ~~`PPB_Flash_Menu`~~ | **Flash 侧已废弃**：76~87 的 `chrome/renderer` 有实现，90 删除；Flash 29 收到 `CONTEXTMENU` 后既不调 `Show()` 也不自绘 | AS3 自定义 `ContextMenu` 无 UI | **不做**（见 §18.1） |
 | **P2** | `PPB_Flash_DRM` | 无宿主 | 受保护视频（Netflix 类） | 只需实现 `GetDeviceID` 的非 DRM 部分即可让 Flash 不报错 |
 | **P2** | `PPB_Flash_MessageLoop` | 只有 plugin 侧 proxy，无 host | 极少数老内容用嵌套消息循环，可能卡住 | 参考 87 的 `ppb_flash_message_loop_impl` |
 | **P2** | `PPP_Flash_BrowserOperations` | 只有头文件 | 浏览器→插件的设置/白名单下发 | 低优先：Flash 自管设置已够用 |
@@ -685,40 +685,68 @@ content/renderer/pepper/pepper_url_loader_host.cc    web_request.SetSkipOrb(true
 
 ---
 
-## 18. 死接口清单（实现前先看这里）
+## 18. 已废弃 / 不可修复的 PPAPI 接口（实现前先看这里）
 
 有些 "缺口" 其实是**上游从未实现的接口**，不是 140 的回归。实现之前必须先确认。
 
-### 18.1 `PPB_Flash_Menu`（已确认死接口）
+### 18.1 `PPB_Flash_Menu`（Flash 侧已废弃，非"从未实现"）
 
-| 检查 | 结果 |
+**重要更正**：早期结论是"上游从未实现"，这是**错的**。往前考古 76 后得到完整事实：
+
+| 版本 | `chrome/renderer/pepper/pepper_flash_menu_host.cc` |
 | --- | --- |
-| Chromium 87 / 138 / 140 的 `content/**` 里 `PpapiHostMsg_FlashMenu` | 全部 **0 命中** |
-| C87（官方 Electron 11）上跑 `MenuProbe.swf` | 无 `CONTEXT_MENU` 事件、无 `FlashMenu` IPC |
-| 140 上同样探针 | 同上 |
+| 76 / 80 / 85 | ✅ 存在 |
+| **87** | ✅ **存在**（与 76 只差 2 行：`ContextMenuParams` → `UntrustworthyContextMenuParams`） |
+| **90** | ❌ 删除（`81da804 [Flash] Remove some Flash APIs`） |
+| 138 / 140 | ❌ 不存在 |
 
-结论：Flash **自己绘制**右键菜单，不走 `PPB_Flash_Menu`。AS3 `ContextMenu.customItems`
-由 Flash 自绘，与宿主无关。
+**Electron 为何一直不工作**：该宿主在 `chrome/renderer/`，Electron 不编译 chrome 层。
+所以"C87 实测不工作"证明的是 **Electron 缺 chrome 层**，不是"上游没实现"。
 
-**本手册曾实现过完整宿主**（`views::MenuRunner` + 递归 `SimpleMenuModel` + 异步应答，
-~450 行），因为**没有调用方**而全部回滚。顺带确认的三件事仍有参考价值：
+**移植后仍无效的原因**（逐层探针实测）：
 
-- `content/browser` 可以依赖 `//ui/views`（编译 + 链接通过）
-- `content/browser` 里 `TOOLKIT_VIEWS` 条件编译 **0 处**，crbug.com/1218907 的隐患不存在
-- `electron/BUILD.gn:516` 已依赖 views，**体积不增加**
+| 层 | 结果 |
+| --- | --- |
+| Blink 派发 `contextmenu` | ✅ `dom_type=contextmenu web_type=5` |
+| `WebPluginContainerImpl` → `kContextMenu` | ✅ |
+| `PepperPluginInstanceImpl::HandleInputEvent` | ✅ `type=5` |
+| `ClassifyInputEvent` → `PP_INPUTEVENT_CLASS_MOUSE` | ✅ |
+| `ConvertEventTypes` → `PP_INPUTEVENT_TYPE_CONTEXTMENU` | ✅ |
+| **Flash 内部收到**（AS3 `CONTEXT_MENU` 回调触发） | ✅ |
+| **Flash 调 `PPB_Flash_Menu::Show()`** | ❌ **0 条 IPC** |
+| **菜单 UI** | ❌ 无 |
 
-### 18.2 判断流程（务必遵守）
+**结论**：Flash 29 收到 `CONTEXTMENU` 后既不调 `Show()` 也不自绘菜单。这是 **Flash 自身行为变化**
+（76 时代会调），也解释了 Chromium 90 为何删掉该 API。Flash 的菜单绘制很可能依赖它自己创建
+popup 窗口的能力，在 PPAPI 无窗口模式下拿不到。
+
+**140 的移植路径**（若将来需要）：
+
+| 76/87 | 140 |
+| --- | --- |
+| `content::ContextMenuParams` | `blink::UntrustworthyContextMenuParams` |
+| `content::MenuItem` | `blink::mojom::CustomContextMenuItemPtr` |
+| `RenderFrame::ShowContextMenu` | `blink::WebLocalFrame::ShowContextMenuFromExternal` |
+| `content::ContextMenuClient` | `blink::mojom::ContextMenuClient`（`AssociatedReceiver`） |
+
+宿主应放在 `content/renderer/pepper/`（Electron 无 chrome 层）。
+
+### 18.2 判断流程（务必遵守；本流程已因 §18.1 的误判修正过一次）
 
 ```
 发现某个 PPAPI 接口"缺宿主"
-  → 先在 C87/138 树里 grep content/** 是否有宿主
-  → 再在 C87 上跑最小探针，看它是否真的工作
-  → 如果 C87 也不行 → 这是"上游从未实现"，不是回归
-  → 优先级重估（通常应降到最低或不做）
+  ↓
+1. grep 相邻 2 个版本（如 138/140）—— 不足以判定"从未实现"
+2. 必须往 Flash EOL 之前考古（76~88），且要同时 grep content/** 和 chrome/**
+3. 用 git log -S <symbol> -- <path> 找删除提交，确认删除版本与原因
+4. 若上游曾有实现 → 说明是"被移除"而非"从未实现"，移植有价值
+5. 移植后仍无效 → 在真实环境加逐层探针，确认断点在哪一层
+   （Blink 事件 → PPAPI 转换 → 插件内部）
+6. 若断点在插件内部（Flash DLL）→ 无法从外部修复，应回滚
 ```
 
-反例成本：本手册为 `PPB_Flash_Menu` 花了 ~1 小时实现 + 2 次全量重编，
-最后全部回滚。
+**教训**：§18.1 最初只查了 87/138/140 且只 grep 了 `content/**`，漏掉 `chrome/**`，
+误判为"上游从未实现"。实际 76~87 的 chrome 层有完整实现。
 
 ### 18.3 对照：确实是真缺口的（已修复）
 
